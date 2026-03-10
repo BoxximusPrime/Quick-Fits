@@ -196,7 +196,6 @@ function Capture.buildEmptyDraft(playerObj)
     return {
         id = nil,
         name = Data.generateDefaultName(playerObj),
-        mode = "replacement",
         items = {},
     }
 end

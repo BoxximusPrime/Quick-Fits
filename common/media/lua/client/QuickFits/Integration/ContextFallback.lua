@@ -1,9 +1,12 @@
 ---@diagnostic disable: undefined-global
 
+require "QuickFits/Localization"
 require "QuickFits/UI/OutfitManagerWindow"
 
 QuickFits = QuickFits or {}
 QuickFits.Integration = QuickFits.Integration or {}
+
+local Localization = QuickFits.Localization
 
 local function getOutfitManagerWindow()
     return QuickFits and QuickFits.UI and QuickFits.UI.OutfitManagerWindow or nil
@@ -23,7 +26,7 @@ local function addQuickFitsContextOption(playerNum, context, items)
     end
 
     context.quickFitsOptionAdded = true
-    context:addOption("Quick Fits...", playerNum, function(targetPlayerNum)
+    context:addOption(Localization.getText("context_open"), playerNum, function(targetPlayerNum)
         local outfitManagerWindow = getOutfitManagerWindow()
         if outfitManagerWindow and outfitManagerWindow.Open then
             outfitManagerWindow.Open(targetPlayerNum)

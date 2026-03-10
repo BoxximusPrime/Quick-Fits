@@ -2,10 +2,13 @@
 
 require "ISUI/InventoryWindow/ISInventoryWindowControlHandler"
 require "ISUI/InventoryWindow/ISInventoryWindowContainerControls"
+require "QuickFits/Localization"
 require "QuickFits/UI/OutfitManagerWindow"
 
 QuickFits = QuickFits or {}
 QuickFits.Integration = QuickFits.Integration or {}
+
+local Localization = QuickFits.Localization
 
 local function getOutfitManagerWindow()
     return QuickFits and QuickFits.UI and QuickFits.UI.OutfitManagerWindow or nil
@@ -22,7 +25,7 @@ function InventoryButtonHandler:shouldBeVisible()
 end
 
 function InventoryButtonHandler:getControl()
-    self.control = self:getButtonControl("Quick Fits")
+    self.control = self:getButtonControl(Localization.getText("inventory_button"))
     return self.control
 end
 

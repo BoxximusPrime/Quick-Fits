@@ -2,9 +2,9 @@
 
 QuickFits = QuickFits or {}
 
-local OPEN_WINDOW_BIND = "Open Quick Fits"
 local DEFAULT_OPEN_WINDOW_KEY = Keyboard.KEY_BACKSLASH or 43
 
+require "QuickFits/Localization"
 require "QuickFits/Data"
 require "QuickFits/Capture"
 require "QuickFits/Search"
@@ -13,9 +13,15 @@ require "QuickFits/UI/OutfitManagerWindow"
 require "QuickFits/Integration/InventoryButton"
 require "QuickFits/Integration/ContextFallback"
 
+local Localization = QuickFits.Localization
+
+local function getOpenWindowBindLabel()
+    return Localization.getText("bind_open")
+end
+
 local function initKeyBindings()
-    table.insert(keyBinding, { value = "[Quick Fits]" })
-    table.insert(keyBinding, { value = OPEN_WINDOW_BIND, key = DEFAULT_OPEN_WINDOW_KEY })
+    table.insert(keyBinding, { value = "[" .. Localization.getText("title") .. "]" })
+    table.insert(keyBinding, { value = getOpenWindowBindLabel(), key = DEFAULT_OPEN_WINDOW_KEY })
 end
 
 local function onKeyPressed(key)
@@ -23,7 +29,7 @@ local function onKeyPressed(key)
         return
     end
 
-    if getCore():isKey(OPEN_WINDOW_BIND, key) then
+    if getCore():isKey(getOpenWindowBindLabel(), key) then
         QuickFits.UI.OutfitManagerWindow.Open(0)
     end
 end

@@ -4,6 +4,7 @@ require "TimedActions/ISTimedActionQueue"
 require "TimedActions/ISInventoryTransferUtil"
 require "TimedActions/ISWearClothing"
 require "TimedActions/ISUnequipAction"
+require "QuickFits/Localization"
 require "QuickFits/Search"
 require "QuickFits/Capture"
 
@@ -11,6 +12,7 @@ QuickFits = QuickFits or {}
 QuickFits.Apply = QuickFits.Apply or {}
 
 local Apply = QuickFits.Apply
+local Localization = QuickFits.Localization
 local Search = QuickFits.Search
 local Capture = QuickFits.Capture
 
@@ -281,7 +283,6 @@ function Apply.applyReplacement(playerObj, outfit)
     end
 
     return {
-        mode = "replacement",
         action = "wear",
         removed = removedCount,
         equipped = equippedCount,
@@ -292,35 +293,45 @@ end
 
 function Apply.applyAdditive(playerObj, outfit)
     local playerNum = playerObj:getPlayerNum()
-    local wornEntries, wornByType, wornByLocation = getWornState(playerObj)
+    local _, wornByType, wornByLocation = getWornState(playerObj)
     local equippedCount = 0
     local removedCount = 0
 
-    if Apply.isOutfitFullyWorn(playerObj, outfit) then
-        local removeTypes = {}
-        local removeEntries = {}
-        for _, descriptor in ipairs(outfit.items or {}) do
-            removeTypes[descriptor.fullType] = true
-        end
-        for _, entry in ipairs(wornEntries) do
-            if removeTypes[entry.fullType] then
-                table.insert(removeEntries, { item = entry.item })
-                queueUnequip(playerObj, entry.item)
+    local reservedItems = {}
+    local equipPlans = {}
+    local missing = {}
+    local removedItems = {}
+
+    for _, descriptor in ipairs(buildOrderedDescriptors(outfit.items)) do
+        if not wornByType[descriptor.fullType] then
+            local blocker = descriptor.bodyLocation ~= "" and wornByLocation[descriptor.bodyLocation] or nil
+            if blocker and blocker.fullType ~= descriptor.fullType and not removedItems[blocker.item] then
+                queueUnequip(playerObj, blocker.item)
+                removedItems[blocker.item] = true
                 removedCount = removedCount + 1
+                wornByType[blocker.fullType] = nil
+                if blocker.bodyLocation ~= "" then
+                    wornByLocation[blocker.bodyLocation] = nil
+                end
+            end
+
+            local item = Search.resolveItem(playerObj, descriptor, reservedItems)
+            if item and Capture.isSupportedWearableItem(item) then
+                reservedItems[item] = true
+                table.insert(equipPlans, {
+                    item = item,
+                    descriptor = descriptor,
+                    displayName = descriptor.displayName or item:getDisplayName(),
+                    fullType = descriptor.fullType,
+                    isContainerLike = isContainerLikeItem(item),
+                })
+            else
+                summarizeMissing(descriptor, missing)
             end
         end
-        setActionProgress(outfit, "inventory", removeEntries)
-        return {
-            mode = "additive",
-            action = "remove",
-            removed = removedCount,
-            equipped = 0,
-            missing = {},
-            blocked = {},
-        }
     end
 
-    local equipPlans, missing, blocked = buildWearPlans(playerObj, outfit, wornByType, wornByLocation)
+    sortPlansWithContainersLast(equipPlans)
     setActionProgress(outfit, "wear", equipPlans)
     for _, plan in ipairs(equipPlans) do
         queueWear(playerObj, playerNum, plan.item)
@@ -328,26 +339,25 @@ function Apply.applyAdditive(playerObj, outfit)
     end
 
     return {
-        mode = "additive",
-        action = "wear",
-        removed = 0,
+        action = "add",
+        removed = removedCount,
         equipped = equippedCount,
         missing = missing,
-        blocked = blocked,
+        blocked = {},
     }
 end
 
 function Apply.placeOutfitInContainer(playerObj, outfit)
     if not playerObj then
-        return nil, "No player was available."
+        return nil, Localization.getText("error_no_player")
     end
     if not outfit then
-        return nil, "Select an outfit first."
+        return nil, Localization.getText("error_select_outfit_first")
     end
 
     local targetContainer, targetSource = Search.resolvePlacementContainer(playerObj)
     if not targetContainer then
-        return nil, "No selected or nearby container was available for Quick Fits."
+        return nil, Localization.getText("error_no_container")
     end
 
     local playerNum = playerObj:getPlayerNum()
@@ -383,7 +393,6 @@ function Apply.placeOutfitInContainer(playerObj, outfit)
     end
 
     return {
-        mode = outfit.mode,
         action = "place",
         transferred = moved,
         targetLabel = Search.getContainerLabel(targetContainer),
@@ -395,10 +404,10 @@ end
 
 function Apply.removeOutfitToInventory(playerObj, outfit)
     if not playerObj then
-        return nil, "No player was available."
+        return nil, Localization.getText("error_no_player")
     end
     if not outfit then
-        return nil, "Select an outfit first."
+        return nil, Localization.getText("error_select_outfit_first")
     end
 
     local wornEntries = getWornState(playerObj)
@@ -421,7 +430,6 @@ function Apply.removeOutfitToInventory(playerObj, outfit)
     setActionProgress(outfit, "inventory", removeEntries)
 
     return {
-        mode = outfit.mode,
         action = "remove",
         removed = removedCount,
         equipped = 0,
@@ -430,16 +438,28 @@ function Apply.removeOutfitToInventory(playerObj, outfit)
     }
 end
 
-function Apply.applyOutfit(playerObj, outfit)
+function Apply.wearOutfit(playerObj, outfit)
     if not playerObj then
-        return nil, "No player was available."
+        return nil, Localization.getText("error_no_player")
     end
     if not outfit then
-        return nil, "Select an outfit first."
+        return nil, Localization.getText("error_select_outfit_first")
     end
 
-    if outfit.mode == "additive" then
-        return Apply.applyAdditive(playerObj, outfit)
-    end
     return Apply.applyReplacement(playerObj, outfit)
+end
+
+function Apply.addOutfit(playerObj, outfit)
+    if not playerObj then
+        return nil, Localization.getText("error_no_player")
+    end
+    if not outfit then
+        return nil, Localization.getText("error_select_outfit_first")
+    end
+
+    return Apply.applyAdditive(playerObj, outfit)
+end
+
+function Apply.applyOutfit(playerObj, outfit)
+    return Apply.wearOutfit(playerObj, outfit)
 end

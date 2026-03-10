@@ -2,12 +2,14 @@
 
 require "ISUI/ISPanel"
 require "ISUI/ISButton"
+require "ISUI/ISComboBox"
 require "ISUI/ISTextEntryBox"
 require "ISUI/ISScrollingListBox"
 require "ISUI/ISToolTip"
 require "ISUI/ISModalDialog"
 require "ISUI/ISInventoryItem"
 require "ISUI/ISMouseDrag"
+require "QuickFits/Localization"
 require "QuickFits/Data"
 require "QuickFits/Capture"
 require "QuickFits/Apply"
@@ -18,6 +20,7 @@ QuickFits.UI = QuickFits.UI or {}
 local Data = QuickFits.Data
 local Capture = QuickFits.Capture
 local Apply = QuickFits.Apply
+local Localization = QuickFits.Localization
 
 local OutfitManagerWindow = ISPanel:derive("QuickFitsOutfitManagerWindow")
 
@@ -28,10 +31,45 @@ local FONT_HGT_MEDIUM = getTextManager():getFontHeight(UIFont.Medium)
 local ICON_SIZE = 20
 local CLOSE_ICON_SIZE = 24
 local WORN_ICON_SIZE = 24
+local PROGRESS_HIDE_DELAY_MS = 2000
 
 local CLOSE_ICON = getTexture("X.png") or getTexture("42.13/X.png")
 local CLOSE_ICON_HOVER = getTexture("X_Hover.png") or getTexture("42.13/X_Hover.png") or CLOSE_ICON
 local WORN_ICON = getTexture("Worn.png") or getTexture("42.13/Worn.png")
+
+local function tr(key, ...)
+    return Localization.getText(key, ...)
+end
+
+local function setButtonLabel(button, text)
+    if not button then
+        return
+    end
+
+    button.title = text
+    button.text = text
+
+    if button.setTitle then
+        button:setTitle(text)
+    end
+end
+
+local function measureButtonWidth(text, minimumWidth, padding)
+    local textWidth = getTextManager():MeasureStringX(UIFont.Small, tostring(text or ""))
+    return math.max(minimumWidth or 0, textWidth + (padding or 28))
+end
+
+local function resetListState(list, selectedIndex)
+    if not list then
+        return
+    end
+
+    list:clear()
+    list.selected = selectedIndex or 0
+    list.mouseoverselected = selectedIndex or 0
+    list:setYScroll(0)
+    list:setScrollHeight(0)
+end
 
 local function getScriptItemForDescriptor(descriptor)
     if not descriptor or not descriptor.fullType then
@@ -45,13 +83,6 @@ local function drawDescriptorIcon(ui, descriptor, x, y, size)
     if scriptItem then
         ISInventoryItem.renderScriptItemIcon(ui, scriptItem, x, y, 1, size or ICON_SIZE, size or ICON_SIZE)
     end
-end
-
-local function formatMode(mode)
-    if mode == "additive" then
-        return "Additive"
-    end
-    return "Replacement"
 end
 
 local function itemLabel(item)
@@ -74,25 +105,25 @@ local function buildDebugItemLabel(item)
 
     local fullType = tostring(item and item.fullType or "")
     if fullType ~= "" then
-        table.insert(details, "fullType=" .. fullType)
+        table.insert(details, tr("debug_full_type", fullType))
     end
 
     local bodyLocation = tostring(item and item.bodyLocation or "")
     if bodyLocation ~= "" then
-        table.insert(details, "body=" .. bodyLocation)
+        table.insert(details, tr("debug_body", bodyLocation))
     end
 
     local itemType = tostring(item and item.itemType or "")
     if itemType ~= "" then
-        table.insert(details, "itemType=" .. itemType)
+        table.insert(details, tr("debug_item_type", itemType))
     end
 
     if item and item.included == false then
-        table.insert(details, "included=false")
+        table.insert(details, tr("debug_included_false"))
     end
 
     if Data.isIgnoredDescriptor(item) then
-        table.insert(details, "ignored=true")
+        table.insert(details, tr("debug_ignored_true"))
     end
 
     if #details == 0 then
@@ -129,6 +160,17 @@ local function nowMs()
         return getTimestampMs()
     end
     return os.time() * 1000
+end
+
+local function drawProgressFillGradient(ui, x, y, width, height)
+    -- Draw base fill
+    ui:drawRect(x, y, width, height, 0.9, 0.18, 0.52, 0.2)
+
+    -- Draw 1px highlight at top
+    ui:drawRect(x, y, width, 1, 0.92, 0.25, 0.65, 0.3)
+
+    -- Draw 1px shadow at bottom
+    ui:drawRect(x, y + height - 1, width, 1, 0.85, 0.12, 0.38, 0.15)
 end
 
 local function getActualDraggedItems(items)
@@ -182,6 +224,19 @@ local function copyLookupCounts(source)
     return copy
 end
 
+local function buildDraftItemsSignature(items)
+    local parts = {}
+
+    for _, item in ipairs(items or {}) do
+        table.insert(parts, string.format("%s|%s|%s",
+            tostring(item and item.fullType or ""),
+            tostring(item and item.bodyLocation or ""),
+            item and item.included ~= false and "1" or "0"))
+    end
+
+    return table.concat(parts, "\n")
+end
+
 local function getOutfitByName(playerObj, name)
     local desired = string.lower(tostring(name or ""):gsub("^%s+", ""):gsub("%s+$", ""))
     if desired == "" then
@@ -206,42 +261,47 @@ end
 local function getEditorTitle(window)
     local selected = window:getSelectedOutfit()
     if selected and selected.name and selected.name ~= "" then
-        return "Editing: " .. selected.name
+        return tr("editor_editing_named", selected.name)
     end
-    return "Editing: New Outfit"
+    return tr("editor_editing_new")
 end
 
 local function summarizeResult(outfit, result)
     if not result then
-        return "Quick Fits could not apply the selected outfit.", true
+        return tr("result_apply_failed"), true
     end
 
     local parts = {}
-    local actionText = "applied"
+    local actionText = tr("result_action_apply")
     if result.action == "remove" then
-        actionText = "removed"
+        actionText = tr("result_action_remove")
+    elseif result.action == "add" then
+        actionText = tr("result_action_add")
     elseif result.action == "wear" then
-        actionText = "worn"
+        actionText = tr("result_action_wear")
     elseif result.action == "place" then
-        actionText = "placed in container"
+        actionText = tr("result_action_place")
     end
-    table.insert(parts, string.format("%s %s.", outfit.name or "Outfit", actionText))
+    table.insert(parts, tr("result_outfit_action", outfit.name or tr("fallback_outfit_name"), actionText))
 
     if result.equipped and result.equipped > 0 then
-        table.insert(parts, string.format("Equipped %d item(s).", result.equipped))
+        table.insert(parts, tr("result_equipped", result.equipped))
     end
     if result.removed and result.removed > 0 then
-        table.insert(parts, string.format("Removed %d item(s).", result.removed))
+        table.insert(parts, tr("result_removed", result.removed))
     end
     if result.blocked and #result.blocked > 0 then
-        table.insert(parts, "Blocked by worn items: " .. table.concat(result.blocked, ", ") .. ".")
+        table.insert(parts, tr("result_blocked", table.concat(result.blocked, ", ")))
     end
     if result.transferred and result.transferred > 0 then
-        local targetText = result.targetLabel and (" into " .. tostring(result.targetLabel)) or ""
-        table.insert(parts, string.format("Moved %d item(s)%s.", result.transferred, targetText))
+        if result.targetLabel and tostring(result.targetLabel) ~= "" then
+            table.insert(parts, tr("result_moved_target", result.transferred, tostring(result.targetLabel)))
+        else
+            table.insert(parts, tr("result_moved", result.transferred))
+        end
     end
     if result.missing and #result.missing > 0 then
-        table.insert(parts, "Missing: " .. table.concat(result.missing, ", ") .. ".")
+        table.insert(parts, tr("result_missing", table.concat(result.missing, ", ")))
     end
 
     return table.concat(parts, " "), (#result.missing > 0 or #result.blocked > 0)
@@ -302,6 +362,8 @@ function OutfitManagerWindow:new(x, y, width, height, playerNum)
     window.currentWornTypeLookup = {}
     window.currentWornItemLookup = {}
     window.activeProgress = nil
+    window.savedDraftSnapshot = nil
+    Localization.setPreviewLanguage(Data.getPreviewLanguage(window.playerObj) or Localization.PREVIEW_LANGUAGE_AUTO)
     return window
 end
 
@@ -317,7 +379,262 @@ function OutfitManagerWindow:createChildren()
     local rightPaneW = self.width - rightPaneX - 12
     local listHeight = self.height - headerY - 100
 
-    self.outfitList = ISScrollingListBox:new(leftPaneX, headerY + 34, leftPaneW, listHeight)
+    self.outfitListX = leftPaneX
+    self.outfitListY = headerY + 34
+    self.outfitListW = leftPaneW
+    self.outfitListH = listHeight
+    self.leftPaneX = leftPaneX
+    self.leftPaneW = leftPaneW
+    self.rightPaneX = rightPaneX
+    self.rightPaneW = rightPaneW
+    self.headerY = headerY
+    self:createOutfitListWidget()
+
+    self.nameEntry = ISTextEntryBox:new("", rightPaneX + 10, headerY + 32, 340, 24)
+    self.nameEntry:initialise()
+    self.nameEntry:instantiate()
+    self.nameEntry.backgroundColor = { r = 0.03, g = 0.04, b = 0.04, a = 1 }
+    self.nameEntry.borderColor = { r = 0.2, g = 0.32, b = 0.3, a = 0.9 }
+    self:addChild(self.nameEntry)
+
+    self.saveButton = ISButton:new(rightPaneX + 360, headerY + 32, 74, 30, "", self, self.onSaveNew)
+    self.saveButton:initialise()
+    self.saveButton:instantiate()
+    self.saveButton.borderColor = { r = 0.3, g = 0.6, b = 0.3, a = 0.9 }
+    self.saveButton.backgroundColor = { r = 0.08, g = 0.18, b = 0.08, a = 0.95 }
+    self:addChild(self.saveButton)
+
+    self.itemListX = rightPaneX
+    self.itemListY = headerY + 119
+    self.itemListW = rightPaneW
+    self.itemListH = self.height - (headerY + 118) - 110
+
+    self.captureButton = ISButton:new(rightPaneX, self.itemListY + self.itemListH + 8, 140, 30, "",
+        self,
+        self.onCaptureCurrent)
+    self.captureButton:initialise()
+    self.captureButton:instantiate()
+    self.captureButton.borderColor = { r = 0.7, g = 0.55, b = 0.2, a = 0.9 }
+    self.captureButton.backgroundColor = { r = 0.2, g = 0.15, b = 0.06, a = 0.95 }
+    self:addChild(self.captureButton)
+
+    self.newButton = ISButton:new(leftPaneX + 195, headerY, 80, 27, "", self, self.onNewDraft)
+    self.newButton:initialise()
+    self.newButton:instantiate()
+    self.newButton.borderColor = { r = 0.35, g = 0.45, b = 0.55, a = 0.9 }
+    self.newButton.backgroundColor = { r = 0.1, g = 0.14, b = 0.18, a = 0.95 }
+    self:addChild(self.newButton)
+
+    self:createDraftItemListWidget()
+
+    self.wearButton = ISButton:new(leftPaneX, self.height - 54, 90, 30, "", self, self.onWear)
+    self.wearButton:initialise()
+    self.wearButton:instantiate()
+    self.wearButton.borderColor = { r = 0.3, g = 0.65, b = 0.3, a = 0.9 }
+    self.wearButton.backgroundColor = { r = 0.08, g = 0.2, b = 0.08, a = 0.95 }
+    self:addChild(self.wearButton)
+
+    self.addButton = ISButton:new(leftPaneX + 100, self.height - 54, 90, 30, "", self, self.onAdd)
+    self.addButton:initialise()
+    self.addButton:instantiate()
+    self.addButton.borderColor = { r = 0.3, g = 0.5, b = 0.68, a = 0.9 }
+    self.addButton.backgroundColor = { r = 0.08, g = 0.13, b = 0.22, a = 0.95 }
+    self:addChild(self.addButton)
+
+    self.removeButton = ISButton:new(leftPaneX + 200, self.height - 54, 100, 30, "", self, self.onRemove)
+    self.removeButton:initialise()
+    self.removeButton:instantiate()
+    self.removeButton.borderColor = { r = 0.7, g = 0.5, b = 0.22, a = 0.9 }
+    self.removeButton.backgroundColor = { r = 0.2, g = 0.12, b = 0.04, a = 0.95 }
+    self:addChild(self.removeButton)
+
+    self.placeButton = ISButton:new(leftPaneX + 310, self.height - 54, 160, 30, "", self,
+        self.onPlaceInContainer)
+    self.placeButton:initialise()
+    self.placeButton:instantiate()
+    self.placeButton.borderColor = { r = 0.3, g = 0.45, b = 0.65, a = 0.9 }
+    self.placeButton.backgroundColor = { r = 0.08, g = 0.12, b = 0.2, a = 0.95 }
+    self:addChild(self.placeButton)
+
+    self.deleteButton = ISButton:new(rightPaneX + 360 + 90, headerY + 32, 90, 30, "", self,
+        self.onDelete)
+    self.deleteButton:initialise()
+    self.deleteButton:instantiate()
+    self.deleteButton.borderColor = { r = 0.65, g = 0.25, b = 0.25, a = 0.9 }
+    self.deleteButton.backgroundColor = { r = 0.2, g = 0.08, b = 0.08, a = 0.95 }
+    self:addChild(self.deleteButton)
+
+    if Data.isDebugMode() then
+        self.languageCombo = ISComboBox:new(rightPaneX + rightPaneW - 190, headerY, 180, 24, self,
+            self.onPreviewLanguageSelected)
+        self.languageCombo:initialise()
+        self.languageCombo:instantiate()
+        self.languageCombo.backgroundColor = { r = 0.03, g = 0.04, b = 0.04, a = 1 }
+        self.languageCombo.borderColor = { r = 0.2, g = 0.32, b = 0.3, a = 0.9 }
+        self:addChild(self.languageCombo)
+        self:populatePreviewLanguageCombo()
+    end
+
+    self:applyLocalizedText()
+
+    self:reloadOutfits()
+    if self.outfits[1] then
+        self.selectedOutfitId = self.outfits[1].id
+        self.outfitList.selected = 1
+        self:loadDraftFromOutfit(self.outfits[1])
+    else
+        self:resetDraftFromCurrent(nil, true)
+    end
+end
+
+function OutfitManagerWindow:populatePreviewLanguageCombo()
+    if not self.languageCombo then
+        return
+    end
+
+    local selectedLanguage = Localization.getPreviewLanguage()
+    self.languageCombo:clear()
+    self.languageCombo.selected = 0
+
+    for index, languageCode in ipairs(Localization.getAvailablePreviewLanguages()) do
+        self.languageCombo:addOptionWithData(Localization.getLanguageLabel(languageCode), languageCode)
+        if languageCode == selectedLanguage then
+            self.languageCombo.selected = index
+        end
+    end
+
+    if self.languageCombo.selected == 0 then
+        self.languageCombo.selected = 1
+    end
+end
+
+function OutfitManagerWindow:layoutLocalizedControls()
+    local topRowY = self.headerY + 32
+    local nameEntryX = self.rightPaneX + 10
+    local rightInset = self.rightPaneX + self.rightPaneW - 10
+    local saveWidth = measureButtonWidth(tr("button_save"), 74, 26)
+    local deleteWidth = measureButtonWidth(tr("button_delete"), 90, 26)
+
+    self.deleteButton:setWidth(deleteWidth)
+    self.deleteButton:setX(rightInset - deleteWidth)
+    self.deleteButton:setY(topRowY)
+
+    self.saveButton:setWidth(saveWidth)
+    self.saveButton:setX(self.deleteButton:getX() - saveWidth - 10)
+    self.saveButton:setY(topRowY)
+
+    self.nameEntry:setX(nameEntryX)
+    self.nameEntry:setY(topRowY)
+    self.nameEntry:setWidth(math.max(180, self.saveButton:getX() - nameEntryX - 10))
+
+    local captureWidth = measureButtonWidth(tr("button_capture_current"), 140, 30)
+    self.captureButton:setWidth(captureWidth)
+    self.captureButton:setX(self.rightPaneX)
+
+    local actionY = self.height - 54
+    local rowGap = 8
+    local minActionSpacing = 8
+    local maxActionSpacing = 8
+    local actionAreaWidth = self.width - (self.leftPaneX * 2)
+    local actionButtons = {
+        { button = self.wearButton,   width = measureButtonWidth(tr("button_wear"), 90, 28) },
+        { button = self.addButton,    width = measureButtonWidth(tr("button_add"), 90, 28) },
+        { button = self.removeButton, width = measureButtonWidth(tr("button_take_off"), 100, 28) },
+        { button = self.placeButton,  width = measureButtonWidth(tr("button_place_container"), 160, 32) },
+    }
+    local actionRows = { {}, {} }
+    local currentRow = 1
+    local currentWidth = 0
+
+    for _, spec in ipairs(actionButtons) do
+        local gapWidth = #actionRows[currentRow] > 0 and minActionSpacing or 0
+        if #actionRows[currentRow] > 0 and currentRow < #actionRows
+            and (currentWidth + gapWidth + spec.width) > actionAreaWidth then
+            currentRow = currentRow + 1
+            currentWidth = 0
+            gapWidth = 0
+        end
+
+        table.insert(actionRows[currentRow], spec)
+        currentWidth = currentWidth + gapWidth + spec.width
+    end
+
+    local rowCount = #actionRows[2] > 0 and 2 or 1
+    local rowStartY = actionY - ((rowCount - 1) * (30 + rowGap))
+    local widestRightEdge = self.leftPaneX
+
+    for rowIndex = 1, rowCount do
+        local row = actionRows[rowIndex]
+        local rowWidth = 0
+        local y = rowStartY + ((rowIndex - 1) * (30 + rowGap))
+
+        for _, spec in ipairs(row) do
+            rowWidth = rowWidth + spec.width
+        end
+
+        local spacing = minActionSpacing
+        if #row > 1 then
+            spacing = math.floor((actionAreaWidth - rowWidth) / (#row - 1))
+            spacing = math.max(minActionSpacing, math.min(maxActionSpacing, spacing))
+        end
+
+        local x = self.leftPaneX
+        for _, spec in ipairs(row) do
+            spec.button:setX(x)
+            spec.button:setY(y)
+            spec.button:setWidth(spec.width)
+            x = x + spec.width + spacing
+            widestRightEdge = math.max(widestRightEdge, spec.button:getRight())
+        end
+    end
+
+    self.actionButtonsRightEdge = widestRightEdge
+    self.actionButtonsBaseY = actionY
+
+    if self.languageCombo then
+        self.languageCombo:setX(self.rightPaneX + self.rightPaneW - self.languageCombo:getWidth() - 10)
+        self.languageCombo:setY(self.headerY)
+    end
+end
+
+function OutfitManagerWindow:applyLocalizedText()
+    setButtonLabel(self.saveButton, tr("button_save"))
+    setButtonLabel(self.captureButton, tr("button_capture_current"))
+    setButtonLabel(self.newButton, tr("button_new"))
+    setButtonLabel(self.wearButton, tr("button_wear"))
+    setButtonLabel(self.addButton, tr("button_add"))
+    setButtonLabel(self.removeButton, tr("button_take_off"))
+    setButtonLabel(self.placeButton, tr("button_place_container"))
+    setButtonLabel(self.deleteButton, tr("button_delete"))
+
+    self.wearButton.tooltip = tr("tooltip_wear")
+    self.addButton.tooltip = tr("tooltip_add")
+    self.removeButton.tooltip = tr("tooltip_take_off")
+    self.placeButton.tooltip = tr("tooltip_place_container")
+
+    self:layoutLocalizedControls()
+end
+
+function OutfitManagerWindow:onPreviewLanguageSelected(combo)
+    local selectedLanguage = tostring(combo:getOptionData(combo.selected) or Localization.PREVIEW_LANGUAGE_AUTO)
+    Localization.setPreviewLanguage(selectedLanguage)
+    if self.playerObj then
+        Data.savePreviewLanguage(self.playerObj, selectedLanguage)
+    end
+
+    self:applyLocalizedText()
+    self:reloadOutfits()
+    self:refreshDraftList(true)
+    self:updateSaveButtonState()
+end
+
+function OutfitManagerWindow:createOutfitListWidget()
+    if self.outfitList then
+        self:removeChild(self.outfitList)
+        self.outfitList = nil
+    end
+
+    self.outfitList = ISScrollingListBox:new(self.outfitListX, self.outfitListY, self.outfitListW, self.outfitListH)
     self.outfitList:initialise()
     self.outfitList:instantiate()
     self.outfitList.itemheight = 60
@@ -327,88 +644,6 @@ function OutfitManagerWindow:createChildren()
         return self:drawOutfitRow(list, y, item, alt)
     end
     self:addChild(self.outfitList)
-
-    self.nameEntry = ISTextEntryBox:new("", rightPaneX + 10, headerY + 32, 260, 24)
-    self.nameEntry:initialise()
-    self.nameEntry:instantiate()
-    self.nameEntry.backgroundColor = { r = 0.03, g = 0.04, b = 0.04, a = 1 }
-    self.nameEntry.borderColor = { r = 0.2, g = 0.32, b = 0.3, a = 0.9 }
-    self:addChild(self.nameEntry)
-
-    self.saveButton = ISButton:new(rightPaneX + 270, headerY + 32, 70, 30, "Save", self, self.onSaveNew)
-    self.saveButton:initialise()
-    self.saveButton:instantiate()
-    self.saveButton.borderColor = { r = 0.3, g = 0.6, b = 0.3, a = 0.9 }
-    self.saveButton.backgroundColor = { r = 0.08, g = 0.18, b = 0.08, a = 0.95 }
-    self:addChild(self.saveButton)
-
-    self.modeButton = ISButton:new(rightPaneX + 424, headerY + 32, 150, 30, "", self, self.onToggleMode)
-    self.modeButton:initialise()
-    self.modeButton:instantiate()
-    self.modeButton.borderColor = { r = 0.45, g = 0.35, b = 0.6, a = 0.9 }
-    self.modeButton.backgroundColor = { r = 0.14, g = 0.1, b = 0.2, a = 0.95 }
-    self:addChild(self.modeButton)
-
-    self.itemListX = rightPaneX
-    self.itemListY = headerY + 118
-    self.itemListW = rightPaneW
-    self.itemListH = self.height - (headerY + 118) - 110
-
-    self.captureButton = ISButton:new(rightPaneX, self.itemListY + self.itemListH + 8, 140, 30, "Set To Currently Worn",
-        self,
-        self.onCaptureCurrent)
-    self.captureButton:initialise()
-    self.captureButton:instantiate()
-    self.captureButton.borderColor = { r = 0.7, g = 0.55, b = 0.2, a = 0.9 }
-    self.captureButton.backgroundColor = { r = 0.2, g = 0.15, b = 0.06, a = 0.95 }
-    self:addChild(self.captureButton)
-
-    self.newButton = ISButton:new(leftPaneX + 196, headerY, 80, 24, "New", self, self.onNewDraft)
-    self.newButton:initialise()
-    self.newButton:instantiate()
-    self.newButton.borderColor = { r = 0.35, g = 0.45, b = 0.55, a = 0.9 }
-    self.newButton.backgroundColor = { r = 0.1, g = 0.14, b = 0.18, a = 0.95 }
-    self:addChild(self.newButton)
-
-    self:createDraftItemListWidget()
-
-    self.wearButton = ISButton:new(leftPaneX, self.height - 54, 90, 30, "Wear", self, self.onWear)
-    self.wearButton:initialise()
-    self.wearButton:instantiate()
-    self.wearButton.borderColor = { r = 0.3, g = 0.65, b = 0.3, a = 0.9 }
-    self.wearButton.backgroundColor = { r = 0.08, g = 0.2, b = 0.08, a = 0.95 }
-    self.wearButton.tooltip = "Attempts to put on all outfit items, using nearby containers if needed."
-    self:addChild(self.wearButton)
-
-    self.placeButton = ISButton:new(leftPaneX + 100, self.height - 54, 160, 30, "Place In Container", self,
-        self.onPlaceInContainer)
-    self.placeButton:initialise()
-    self.placeButton:instantiate()
-    self.placeButton.borderColor = { r = 0.3, g = 0.45, b = 0.65, a = 0.9 }
-    self.placeButton.backgroundColor = { r = 0.08, g = 0.12, b = 0.2, a = 0.95 }
-    self.placeButton.tooltip =
-    "Moves outfit items into a container, using the selected container first and then the nearest container."
-    self:addChild(self.placeButton)
-
-    self.removeButton = ISButton:new(leftPaneX + 270, self.height - 54, 90, 30, "Place In Inventory", self, self
-        .onRemove)
-    self.removeButton:initialise()
-    self.removeButton:instantiate()
-    self.removeButton.borderColor = { r = 0.7, g = 0.5, b = 0.22, a = 0.9 }
-    self.removeButton.backgroundColor = { r = 0.2, g = 0.12, b = 0.04, a = 0.95 }
-    self.removeButton.tooltip = "Removes the outfit items and puts them back into the player's inventory."
-    self:addChild(self.removeButton)
-
-    self.deleteButton = ISButton:new(self.width - 140, self.itemListY + self.itemListH + 8, 90, 30, "Delete Outfit", self,
-        self.onDelete)
-    self.deleteButton:initialise()
-    self.deleteButton:instantiate()
-    self.deleteButton.borderColor = { r = 0.65, g = 0.25, b = 0.25, a = 0.9 }
-    self.deleteButton.backgroundColor = { r = 0.2, g = 0.08, b = 0.08, a = 0.95 }
-    self:addChild(self.deleteButton)
-
-    self:reloadOutfits()
-    self:resetDraftFromCurrent(nil)
 end
 
 function OutfitManagerWindow:createDraftItemListWidget()
@@ -453,7 +688,8 @@ function OutfitManagerWindow:drawOutfitRow(list, y, item, alt)
         list:drawRectBorder(0, y, list.width, rowHeight, 0.45, 0.5, 0.48, 0.32)
         list:drawRect(0, y, 6, rowHeight, 1, 0.2, 1, 0.1)
     elseif list.mouseoverselected == item.index and list:isMouseOver() and not list:isMouseOverScrollBar() then
-        list:drawRect(0, y, list.width, rowHeight, 0.08, 0.26, 0.26, 0.2)
+        list:drawRect(1, y + 1, list.width - 2, rowHeight - 2, 0.08, 0.26, 0.26, 0.2)
+        list:drawRectBorder(1, y + 1, list.width - 2, rowHeight - 2, 0.5, 1, 0.97, 0.92)
     end
 
     list:drawRectBorder(0, y, list.width, rowHeight, 0.18, 0.38, 0.34, 0.18)
@@ -463,7 +699,7 @@ function OutfitManagerWindow:drawOutfitRow(list, y, item, alt)
     local nameText = truncateText(item.text or "", UIFont.Small, maxTextW)
     list:drawText(nameText, 24, y + 8, 0.97, 0.95, 0.9, 1, UIFont.Small)
 
-    local itemLabelText = totalCount == 1 and "item" or "items"
+    local itemLabelText = totalCount == 1 and tr("label_item_singular") or tr("label_item_plural")
     local subtitle = string.format("%d / %d %s", matchedCount, totalCount, itemLabelText)
     local subText = truncateText(subtitle, UIFont.Small, maxTextW)
     local subtitleColor = (totalCount > 0 and matchedCount == totalCount)
@@ -491,6 +727,11 @@ function OutfitManagerWindow:drawDraftRow(list, y, item, alt)
         list:drawRect(0, y, list.width, rowHeight, 0.06, 0.11, 0.11, 0.13)
     end
 
+    if list.mouseoverselected == item.index and list:isMouseOver() and not list:isMouseOverScrollBar() then
+        list:drawRect(1, y + 1, list.width - 2, rowHeight - 2, 0.15, 0.38, 0.38, 0.28)
+        list:drawRectBorder(1, y + 1, list.width - 2, rowHeight - 2, 0.5, 1, 0.97, 0.92)
+    end
+
     list:drawRectBorder(0, y, list.width, rowHeight, 0.1, 0.28, 0.26, 0.16)
     drawDescriptorIcon(list, draftItem, 8, y + 6, ICON_SIZE)
 
@@ -515,7 +756,8 @@ function OutfitManagerWindow:drawDraftRow(list, y, item, alt)
             list:drawTextureScaled(WORN_ICON, wornIndicatorX, wornIndicatorY, WORN_ICON_SIZE, WORN_ICON_SIZE,
                 isIncluded and 1 or 0.45, 1, 1, 1)
         else
-            list:drawText("WORN", wornIndicatorX - 6, y + 8, 0.94, 0.93, 0.88, isIncluded and 1 or 0.4, UIFont.Small)
+            list:drawText(tr("label_worn"), wornIndicatorX - 6, y + 8, 0.94, 0.93, 0.88, isIncluded and 1 or 0.4,
+                UIFont.Small)
         end
     end
 
@@ -524,7 +766,7 @@ function OutfitManagerWindow:drawDraftRow(list, y, item, alt)
     local displayText = truncateText(labelText, UIFont.Small, maxTextW)
     local textAlpha = isIncluded and 1 or 0.4
     local textColor = isCurrentlyWorn and { 0.82, 0.96, 0.84 } or { 0.94, 0.93, 0.88 }
-    list:drawText(displayText, 34, y + 8, textColor[1], textColor[2], textColor[3], textAlpha, UIFont.Small)
+    list:drawText(displayText, 34, y + 2, textColor[1], textColor[2], textColor[3], textAlpha, UIFont.Small)
 
     return y + rowHeight
 end
@@ -644,6 +886,7 @@ function OutfitManagerWindow:beginWearProgress(progress)
         targetContainer = progress.targetContainer,
         total = progress.total or #progress.entries,
         completed = 0,
+        completedAt = nil,
     }
 end
 
@@ -662,7 +905,14 @@ function OutfitManagerWindow:updateWearProgress()
     end
 
     if completed >= total then
-        self.activeProgress = nil
+        self.activeProgress.completed = total
+        if not self.activeProgress.completedAt then
+            self.activeProgress.completedAt = nowMs()
+        elseif nowMs() >= (self.activeProgress.completedAt + PROGRESS_HIDE_DELAY_MS) then
+            self.activeProgress = nil
+        end
+    else
+        self.activeProgress.completedAt = nil
     end
 end
 
@@ -671,8 +921,8 @@ function OutfitManagerWindow:drawWearProgressBar()
         return
     end
 
-    local barX = self.removeButton and (self.removeButton:getX() + self.removeButton:getWidth() + 10) or 12
-    local barY = self.height - 54
+    local barX = math.max((self.actionButtonsRightEdge or 482) + 18, 500)
+    local barY = self.actionButtonsBaseY or (self.height - 54)
     local barW = self.width - barX - 12
     local barH = 30
     if barW <= 2 then
@@ -685,7 +935,7 @@ function OutfitManagerWindow:drawWearProgressBar()
     self:drawRect(barX, barY, barW, barH, 0.4, 0.06, 0.08, 0.1)
     self:drawRectBorder(barX, barY, barW, barH, 0.45, 0.28, 0.34, 0.32)
     if fillW > 0 then
-        self:drawRect(barX + 1, barY + 1, fillW, barH - 2, 0.9, 0.18, 0.52, 0.2)
+        drawProgressFillGradient(self, barX + 1, barY + 1, fillW, barH - 2)
     end
 
     self:drawTextCentre(string.format("%d / %d", completed, total), barX + math.floor(barW / 2), barY + 1,
@@ -761,13 +1011,13 @@ function OutfitManagerWindow:drawDraftDropHint()
         self:drawTextCentre(self.draftOverlayText, x + (width / 2), y + math.floor(height / 2) - 6,
             0.96, 0.92, 0.88, 1, UIFont.Medium)
     elseif not hasItems then
-        self:drawTextCentre("Drag wearable items here", x + (width / 2), y + math.floor(height / 2) - 10,
+        self:drawTextCentre(tr("drop_hint_drag_here"), x + (width / 2), y + math.floor(height / 2) - 10,
             isHovered and 0.92 or 0.62, isHovered and 0.92 or 0.64, isHovered and 0.82 or 0.56, 0.95, UIFont.Medium)
-        self:drawTextCentre("or use Capture Worn to pull from your current gear", x + (width / 2),
+        self:drawTextCentre(tr("drop_hint_capture"), x + (width / 2),
             y + math.floor(height / 2) + 10,
             0.5, 0.52, 0.48, 0.85, UIFont.Small)
     elseif isHovered then
-        self:drawTextCentre("Release to add dragged wearable items", x + (width / 2), y + 10, 0.86, 0.9, 0.76, 0.95,
+        self:drawTextCentre(tr("drop_hint_release"), x + (width / 2), y + 10, 0.86, 0.9, 0.76, 0.95,
             UIFont.Small)
     end
 end
@@ -785,7 +1035,7 @@ function OutfitManagerWindow:render()
     self:drawRect(0, 0, self.width, self.headerHeight, 0.95, 0.11, 0.11, 0.13)
     self:drawRectBorder(0, 0, self.width, self.height, self.borderColor.a, self.borderColor.r, self.borderColor.g,
         self.borderColor.b)
-    self:drawText("Quick Fits", 14, 2, 0.99, 0.96, 0.88, 1, UIFont.Medium)
+    self:drawText(tr("title"), 14, 2, 0.99, 0.96, 0.88, 1, UIFont.Medium)
 
     if closeHovered and CLOSE_ICON_HOVER then
         self:drawTextureScaled(CLOSE_ICON_HOVER, closeX, closeY, closeW, closeH, 1, 1, 1, 1)
@@ -802,14 +1052,16 @@ function OutfitManagerWindow:render()
     self:drawRectBorder(306, self.headerHeight + 8, self.width - 318, self.height - self.headerHeight - 78, 0.2, 0.36,
         0.32, 0.2)
 
-    self:drawText("Outfits", 14, self.headerHeight + 10, 0.92, 0.86, 0.68, 1, UIFont.Small)
+    self:drawText(tr("label_outfits"), 20, self.headerHeight + 12, 0.92, 0.86, 0.68, 1, UIFont.Small)
     self:drawText(getEditorTitle(self), 308, self.headerHeight + 10, 0.92, 0.86, 0.68, 1, UIFont.Small)
 
-    self:drawRect(310, self.headerHeight + 100, self.width - 326, 1, 0.16, 0.38, 0.34, 0.2)
-    self:drawText("Items in Outfit", 308, self.headerHeight + 104, 0.6, 0.58, 0.5, 1, UIFont.Small)
+    if self.languageCombo then
+        self:drawText(tr("debug_preview_language"), self.languageCombo:getX(), self.languageCombo:getY() - 18,
+            0.76, 0.82, 0.78, 0.95, UIFont.Small)
+    end
 
-    self:drawRect(529, self.headerHeight + 77, 1, 18, 0.2, 0.42, 0.38, 0.28)
-    self:drawText("Type:", 306 + 360, self.headerHeight + 48, 0.92, 0.86, 0.68, 1, UIFont.Small)
+    self:drawRect(310, self.headerHeight + 100, self.width - 326, 1, 0.16, 0.38, 0.34, 0.2)
+    self:drawText(tr("label_items_in_outfit"), 308, self.headerHeight + 104, 0.6, 0.58, 0.5, 1, UIFont.Small)
 
     self:drawRect(12, self.height - 64, self.width - 24, 1, 0.14, 0.32, 0.3, 0.18)
 
@@ -821,6 +1073,7 @@ function OutfitManagerWindow:update()
     ISPanel.update(self)
     self:refreshCurrentWornLookup()
     self:updateWearProgress()
+    self:updateSaveButtonState()
 
     if self.draftOverlayUntil > 0 and self.draftOverlayUntil <= nowMs() then
         self.draftOverlayText = nil
@@ -909,6 +1162,46 @@ function OutfitManagerWindow:setDraftOverlay(text, isError, durationMs)
     self.draftOverlayUntil = nowMs() + (durationMs or 2200)
 end
 
+function OutfitManagerWindow:getCurrentDraftSnapshot()
+    return {
+        name = self.nameEntry and self.nameEntry:getText() or tostring(self.editorDraft and self.editorDraft.name or ""),
+        itemsSignature = buildDraftItemsSignature(self.editorDraft and self.editorDraft.items or {}),
+    }
+end
+
+function OutfitManagerWindow:setSavedDraftSnapshot(draft)
+    self.savedDraftSnapshot = {
+        name = tostring(draft and draft.name or ""),
+        itemsSignature = buildDraftItemsSignature(draft and draft.items or {}),
+    }
+    self:updateSaveButtonState()
+end
+
+function OutfitManagerWindow:hasUnsavedChanges()
+    if not self.editorDraft or not self.savedDraftSnapshot then
+        return false
+    end
+
+    local current = self:getCurrentDraftSnapshot()
+    return current.name ~= self.savedDraftSnapshot.name
+        or current.itemsSignature ~= self.savedDraftSnapshot.itemsSignature
+end
+
+function OutfitManagerWindow:updateSaveButtonState()
+    if not self.saveButton then
+        return
+    end
+
+    local isDirty = self:hasUnsavedChanges()
+    self.saveButton.enable = isDirty
+    self.saveButton.borderColor = isDirty
+        and { r = 0.3, g = 0.6, b = 0.3, a = 0.9 }
+        or { r = 0.2, g = 0.24, b = 0.22, a = 0.65 }
+    self.saveButton.backgroundColor = isDirty
+        and { r = 0.08, g = 0.18, b = 0.08, a = 0.95 }
+        or { r = 0.08, g = 0.09, b = 0.09, a = 0.72 }
+end
+
 function OutfitManagerWindow:hasDraggedInventoryItems()
     return ISMouseDrag and ISMouseDrag.dragging and #ISMouseDrag.dragging > 0
 end
@@ -933,14 +1226,14 @@ function OutfitManagerWindow:tryAcceptDraggedItems()
     local added, duplicate, rejected = Capture.addInventoryItemsToDraft(self.editorDraft, draggedItems)
     if added <= 0 then
         if rejected > 0 and duplicate > 0 then
-            self:setStatus("Only wearable items can be added, and dragged duplicates were ignored.", true)
-            self:setDraftOverlay("Only wearable items belong here. Duplicates were ignored.", true)
+            self:setStatus(tr("draft_error_wearable_duplicates"), true)
+            self:setDraftOverlay(tr("draft_overlay_wearable_duplicates"), true)
         elseif rejected > 0 then
-            self:setStatus("Only wearable items can be added to a Quick Fit.", true)
-            self:setDraftOverlay("Only wearable items can be dropped into an outfit.", true)
+            self:setStatus(tr("draft_error_only_wearable"), true)
+            self:setDraftOverlay(tr("draft_overlay_only_wearable"), true)
         else
-            self:setStatus("Those items are already in this Quick Fit.", true)
-            self:setDraftOverlay("That wearable is already in this outfit.", true)
+            self:setStatus(tr("draft_error_already_present"), true)
+            self:setDraftOverlay(tr("draft_overlay_already_present"), true)
         end
         clearAcceptedDrag()
         return true
@@ -948,9 +1241,9 @@ function OutfitManagerWindow:tryAcceptDraggedItems()
 
     self:refreshDraftList(true)
 
-    local status = string.format("Added %d wearable item(s) to the draft.", added)
+    local status = tr("draft_added", added)
     if duplicate > 0 or rejected > 0 then
-        status = status .. string.format(" Ignored %d duplicate(s) and %d non-wearable item(s).", duplicate, rejected)
+        status = status .. tr("draft_added_ignored", duplicate, rejected)
     end
     self:setStatus(status, false)
     clearAcceptedDrag()
@@ -959,8 +1252,7 @@ end
 
 function OutfitManagerWindow:reloadOutfits()
     self.outfits = Data.getOutfits(self.playerObj)
-    self.outfitList:clear()
-    self.outfitList.mouseoverselected = 0
+    resetListState(self.outfitList, 0)
     for _, outfit in ipairs(self.outfits) do
         self.outfitList:addItem(outfit.name, outfit)
     end
@@ -987,19 +1279,14 @@ function OutfitManagerWindow:refreshDraftList(preserveNameText)
         end
     end
 
-    self:createDraftItemListWidget()
-    self.itemList.selected = -1
-    self.itemList.mouseoverselected = -1
+    resetListState(self.itemList, -1)
     self.itemList.smoothScrollTargetY = nil
     self.itemList.smoothScrollY = nil
-    self.itemList:setYScroll(0)
-    self.itemList:setScrollHeight(0)
     for _, item in ipairs(self.editorDraft.items or {}) do
         self.itemList:addItem(getDraftRowLabel(item), item)
     end
 
     self.nameEntry:setText(currentNameText or self.editorDraft.name or "")
-    self.modeButton:setTitle(formatMode(self.editorDraft.mode))
 end
 
 function OutfitManagerWindow:getSelectedOutfit()
@@ -1009,24 +1296,30 @@ function OutfitManagerWindow:getSelectedOutfit()
     return Data.getOutfitById(self.playerObj, self.selectedOutfitId)
 end
 
-function OutfitManagerWindow:resetDraftFromCurrent(selectedOutfit)
+function OutfitManagerWindow:resetDraftFromCurrent(selectedOutfit, markClean)
     self.editorDraft = Capture.buildDraftFromCurrent(self.playerObj, selectedOutfit)
     if selectedOutfit then
         self.editorDraft.name = selectedOutfit.name
-        self.editorDraft.mode = selectedOutfit.mode
     end
     self:refreshDraftList()
+
+    if markClean then
+        self:setSavedDraftSnapshot(self.editorDraft)
+    elseif selectedOutfit then
+        self:setSavedDraftSnapshot(selectedOutfit)
+    end
 end
 
 function OutfitManagerWindow:loadDraftFromOutfit(outfit)
     self.editorDraft = Data.buildEditableDraft(outfit)
     self:refreshDraftList()
+    self:setSavedDraftSnapshot(outfit)
 end
 
 function OutfitManagerWindow:onOutfitSelected(outfit)
     self.selectedOutfitId = outfit.id
     self:loadDraftFromOutfit(outfit)
-    self:setStatus("Selected outfit: " .. outfit.name, false)
+    self:setStatus(tr("status_selected_outfit", outfit.name), false)
 end
 
 function OutfitManagerWindow:onDraftListMouseDown(x, y)
@@ -1052,24 +1345,14 @@ end
 function OutfitManagerWindow:buildDraftFromEditor()
     return {
         name = self.nameEntry:getText(),
-        mode = self.editorDraft.mode,
         items = self.editorDraft.items,
     }
 end
 
-function OutfitManagerWindow:onToggleMode()
-    if self.editorDraft.mode == "replacement" then
-        self.editorDraft.mode = "additive"
-    else
-        self.editorDraft.mode = "replacement"
-    end
-    self.modeButton:setTitle(formatMode(self.editorDraft.mode))
-end
-
 function OutfitManagerWindow:onCaptureCurrent()
     local selectedOutfit = self:getSelectedOutfit()
-    self:resetDraftFromCurrent(selectedOutfit)
-    self:setStatus("Captured the player’s current worn items into the editor.", false)
+    self:resetDraftFromCurrent(selectedOutfit, false)
+    self:setStatus(tr("status_captured_current"), false)
 end
 
 function OutfitManagerWindow:onNewDraft()
@@ -1081,10 +1364,15 @@ function OutfitManagerWindow:onNewDraft()
     self.draftOverlayIsError = false
     self.draftOverlayUntil = 0
     self:refreshDraftList()
-    self:setStatus("Started a new empty outfit draft. Drag wearable items in or use Capture Worn.", false)
+    self:setSavedDraftSnapshot(self.editorDraft)
+    self:setStatus(tr("status_new_draft"), false)
 end
 
 function OutfitManagerWindow:onSaveNew()
+    if not self:hasUnsavedChanges() then
+        return
+    end
+
     local draft = self:buildDraftFromEditor()
     local selected = self:getSelectedOutfit()
     local existing = selected or getOutfitByName(self.playerObj, draft.name)
@@ -1098,20 +1386,20 @@ function OutfitManagerWindow:onSaveNew()
     self:reloadOutfits()
     self:loadDraftFromOutfit(outfit)
     if selected or existing then
-        self:setStatus("Saved changes to outfit: " .. outfit.name, false)
+        self:setStatus(tr("status_saved_changes", outfit.name), false)
     else
-        self:setStatus("Saved outfit: " .. outfit.name, false)
+        self:setStatus(tr("status_saved_new", outfit.name), false)
     end
 end
 
 function OutfitManagerWindow:onDelete()
     local selected = self:getSelectedOutfit()
     if not selected then
-        self:setStatus("Select an outfit before deleting it.", true)
+        self:setStatus(tr("status_select_before_delete"), true)
         return
     end
 
-    local modal = ISModalDialog:new(self:getX() + 180, self:getY() + 160, 320, 140, "Delete " .. selected.name .. "?",
+    local modal = ISModalDialog:new(self:getX() + 180, self:getY() + 160, 320, 140, tr("delete_confirm", selected.name),
         true, self, self.onDeleteConfirmed, self.playerNum, selected.id)
     modal:initialise()
     modal:addToUIManager()
@@ -1126,20 +1414,39 @@ function OutfitManagerWindow:onDeleteConfirmed(button, outfitId)
         self.selectedOutfitId = nil
         self:reloadOutfits()
         self:onNewDraft()
-        self:setStatus("Deleted the selected outfit.", false)
+        self:setStatus(tr("status_deleted"), false)
     else
-        self:setStatus("Quick Fits could not delete the selected outfit.", true)
+        self:setStatus(tr("status_delete_failed"), true)
     end
 end
 
 function OutfitManagerWindow:onWear()
     local selected = self:getSelectedOutfit()
     if not selected then
-        self:setStatus("Select an outfit before wearing it.", true)
+        self:setStatus(tr("status_select_before_wear"), true)
         return
     end
 
-    local result, err = Apply.applyOutfit(self.playerObj, selected)
+    local result, err = Apply.wearOutfit(self.playerObj, selected)
+    if not result then
+        self:setStatus(err, true)
+        return
+    end
+
+    self:beginWearProgress(Apply.consumeLastWearProgress())
+
+    local summary, isError = summarizeResult(selected, result)
+    self:setStatus(summary, isError)
+end
+
+function OutfitManagerWindow:onAdd()
+    local selected = self:getSelectedOutfit()
+    if not selected then
+        self:setStatus(tr("status_select_before_add"), true)
+        return
+    end
+
+    local result, err = Apply.addOutfit(self.playerObj, selected)
     if not result then
         self:setStatus(err, true)
         return
@@ -1154,7 +1461,7 @@ end
 function OutfitManagerWindow:onPlaceInContainer()
     local selected = self:getSelectedOutfit()
     if not selected then
-        self:setStatus("Select an outfit before placing it in a container.", true)
+        self:setStatus(tr("status_select_before_place"), true)
         return
     end
 
@@ -1173,7 +1480,7 @@ end
 function OutfitManagerWindow:onRemove()
     local selected = self:getSelectedOutfit()
     if not selected then
-        self:setStatus("Select an outfit before removing it.", true)
+        self:setStatus(tr("status_select_before_remove"), true)
         return
     end
 

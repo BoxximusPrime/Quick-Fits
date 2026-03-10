@@ -1,9 +1,12 @@
 ---@diagnostic disable: undefined-global
 
+require "QuickFits/Localization"
+
 QuickFits = QuickFits or {}
 QuickFits.Search = QuickFits.Search or {}
 
 local Search = QuickFits.Search
+local Localization = QuickFits.Localization
 
 local function isFloorContainer(container)
     return container and string.lower(tostring(container:getType() or "")) == "floor"
@@ -294,7 +297,7 @@ end
 
 function Search.getContainerLabel(container)
     if not container then
-        return "container"
+        return Localization.getText("container_generic")
     end
 
     local containingItem = nil
@@ -310,7 +313,7 @@ function Search.getContainerLabel(container)
 
     local containerType = tostring(container:getType() or "")
     if containerType == "" then
-        return "nearby container"
+        return Localization.getText("container_nearby")
     end
     return containerType
 end

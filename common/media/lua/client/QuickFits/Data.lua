@@ -1,11 +1,14 @@
 ---@diagnostic disable: undefined-global
 
+require "QuickFits/Localization"
+
 QuickFits = QuickFits or {}
 QuickFits.Data = QuickFits.Data or {}
 
 local Data = QuickFits.Data
+local Localization = QuickFits.Localization
 
-Data.SCHEMA_VERSION = 3
+Data.SCHEMA_VERSION = 4
 
 local IGNORED_BODY_LOCATIONS = {
     ["transmogde:transmog_location"] = true,
@@ -48,13 +51,6 @@ local function sanitizeName(name)
         return nil
     end
     return trimmed
-end
-
-local function normalizeMode(mode)
-    if mode == "additive" then
-        return "additive"
-    end
-    return "replacement"
 end
 
 function Data.isIgnoredDescriptor(item)
@@ -101,9 +97,13 @@ function Data.cloneItems(items, includeIgnored)
     return copy
 end
 
-local function sanitizeOutfitItems(outfit)
+local function sanitizeOutfit(outfit)
     local sanitized = Data.cloneItems(outfit and outfit.items or {}, false)
     local changed = #sanitized ~= #(outfit and outfit.items or {})
+    if outfit and outfit.mode ~= nil then
+        outfit.mode = nil
+        changed = true
+    end
     outfit.items = sanitized
     return changed
 end
@@ -118,7 +118,6 @@ function Data.cloneOutfit(outfit)
     return {
         id = outfit.id,
         name = outfit.name,
-        mode = outfit.mode,
         createdAt = outfit.createdAt,
         updatedAt = outfit.updatedAt,
         items = Data.cloneItems(outfit.items, includeIgnored),
@@ -150,7 +149,10 @@ function Data.ensureStore(playerObj)
     local allowIgnoredForDebug = Data.isDebugMode()
     for _, outfit in ipairs(store.outfits) do
         if not allowIgnoredForDebug then
-            didMutate = sanitizeOutfitItems(outfit) or didMutate
+            didMutate = sanitizeOutfit(outfit) or didMutate
+        elseif outfit and outfit.mode ~= nil then
+            outfit.mode = nil
+            didMutate = true
         end
     end
 
@@ -194,7 +196,7 @@ function Data.generateDefaultName(playerObj)
 
     local index = 1
     while true do
-        local candidate = string.format("Outfit %d", index)
+        local candidate = Localization.getText("default_outfit_name", index)
         if not used[string.lower(candidate)] then
             return candidate
         end
@@ -212,7 +214,6 @@ function Data.buildEditableDraft(outfit)
     return {
         id = outfit.id,
         name = outfit.name,
-        mode = outfit.mode,
         items = Data.cloneItems(outfit.items, includeIgnored),
     }
 end
@@ -220,7 +221,6 @@ end
 function Data.saveOutfit(playerObj, draft, existingId)
     local store = Data.ensureStore(playerObj)
     local name = sanitizeName(draft and draft.name) or Data.generateDefaultName(playerObj)
-    local mode = normalizeMode(draft and draft.mode)
     local items = {}
 
     for _, item in ipairs(draft and draft.items or {}) do
@@ -235,7 +235,7 @@ function Data.saveOutfit(playerObj, draft, existingId)
     end
 
     if #items == 0 then
-        return nil, "Select at least one worn item to save this outfit."
+        return nil, Localization.getText("error_save_empty")
     end
 
     local target = existingId and Data.getOutfitById(playerObj, existingId) or nil
@@ -243,7 +243,6 @@ function Data.saveOutfit(playerObj, draft, existingId)
     local outfit = {
         id = target and target.id or Data.generateId(playerObj),
         name = name,
-        mode = mode,
         createdAt = createdAt,
         updatedAt = nowMs(),
         items = items,
@@ -265,12 +264,12 @@ end
 function Data.renameOutfit(playerObj, outfitId, newName)
     local outfit = Data.getOutfitById(playerObj, outfitId)
     if not outfit then
-        return nil, "Select an outfit first."
+        return nil, Localization.getText("error_select_outfit_first")
     end
 
     local name = sanitizeName(newName)
     if not name then
-        return nil, "Enter a name before renaming the outfit."
+        return nil, Localization.getText("error_rename_missing")
     end
 
     outfit.name = name
@@ -303,4 +302,19 @@ end
 
 function Data.getWindowState(playerObj)
     return Data.ensureStore(playerObj).ui
+end
+
+function Data.savePreviewLanguage(playerObj, languageCode)
+    local ui = Data.ensureStore(playerObj).ui
+    ui.previewLanguage = tostring(languageCode or "")
+    Data.transmit(playerObj)
+end
+
+function Data.getPreviewLanguage(playerObj)
+    local ui = Data.ensureStore(playerObj).ui
+    local previewLanguage = tostring(ui.previewLanguage or "")
+    if previewLanguage == "" then
+        return nil
+    end
+    return previewLanguage
 end
