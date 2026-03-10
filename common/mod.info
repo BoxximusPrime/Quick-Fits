@@ -1,0 +1,7 @@
+name=Quick Fits
+id=QuickFits
+author=BoxxyPrime
+description=Adds a Quick Fits outfit manager to the personal inventory window for saving and applying wearable sets.
+poster=poster.png
+modversion=1.0.0
+versionMin=42.14
