@@ -13,6 +13,11 @@ Data.SCHEMA_VERSION = 4
 local IGNORED_BODY_LOCATIONS = {
     ["transmogde:transmog_location"] = true,
     ["transmogde:hide_everything_location"] = true,
+    ["hair"] = true,
+    ["beard"] = true,
+    ["stubble"] = true,
+    ["moustache"] = true,
+    ["mustache"] = true,
 }
 
 local function startsWithTransmogPrefix(value)
@@ -56,6 +61,16 @@ end
 function Data.isIgnoredDescriptor(item)
     local bodyLocation = string.lower(tostring(item and item.bodyLocation or ""))
     if IGNORED_BODY_LOCATIONS[bodyLocation] then
+        return true
+    end
+
+    if bodyLocation:find("hair", 1, true) ~= nil
+        or bodyLocation:find("beard", 1, true) ~= nil
+        or bodyLocation:find("stubble", 1, true) ~= nil
+        or bodyLocation:find("moustache", 1, true) ~= nil
+        or bodyLocation:find("mustache", 1, true) ~= nil
+        or bodyLocation:find("eyebrow", 1, true) ~= nil
+        or bodyLocation:find("eyelash", 1, true) ~= nil then
         return true
     end
 

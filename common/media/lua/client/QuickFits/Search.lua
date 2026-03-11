@@ -130,6 +130,27 @@ local function addContainer(containers, seen, container)
     table.insert(containers, container)
 end
 
+local function addBackpackInventories(containers, seen, backpacks, playerInventory)
+    for _, backpack in ipairs(backpacks or {}) do
+        local container = backpack and backpack.inventory or nil
+        if container and container ~= playerInventory then
+            addContainer(containers, seen, container)
+        end
+    end
+end
+
+local function addPlacementCandidate(candidates, seen, container, source)
+    if not container or seen[container] then
+        return
+    end
+
+    seen[container] = true
+    table.insert(candidates, {
+        container = container,
+        source = source,
+    })
+end
+
 local function addContainersFromObject(containers, seen, object)
     local okSingle, singleContainer = pcall(function()
         return object:getContainer()
@@ -276,6 +297,27 @@ function Search.getSelectedLootContainer(playerObj)
     return container
 end
 
+function Search.getReachableLootContainers(playerObj)
+    local containers = {}
+    local seen = {}
+    local playerInventory = playerObj and playerObj:getInventory() or nil
+
+    if playerInventory then
+        seen[playerInventory] = true
+    end
+
+    local playerNum = playerObj and playerObj:getPlayerNum() or -1
+    local ok, lootWindow = pcall(function()
+        return getPlayerLoot(playerNum)
+    end)
+    if not ok or not lootWindow or not lootWindow.inventoryPane or not lootWindow.inventoryPane.inventoryPage then
+        return containers
+    end
+
+    addBackpackInventories(containers, seen, lootWindow.inventoryPane.inventoryPage.backpacks, playerInventory)
+    return containers
+end
+
 function Search.resolvePlacementContainer(playerObj)
     local selectedContainer = Search.getSelectedLootContainer(playerObj)
     if selectedContainer then
@@ -293,6 +335,35 @@ function Search.resolvePlacementContainer(playerObj)
     end
 
     return nil, nil
+end
+
+function Search.getPlacementCandidates(playerObj)
+    local candidates = {}
+    local seen = {}
+
+    local selectedContainer = Search.getSelectedLootContainer(playerObj)
+    if selectedContainer then
+        addPlacementCandidate(candidates, seen, selectedContainer, "selected")
+    end
+
+    local floorCandidates = {}
+    for _, container in ipairs(Search.getNearbyContainers(playerObj, 2)) do
+        if isFloorContainer(container) then
+            addPlacementCandidate(floorCandidates, seen, container, "floor")
+        else
+            addPlacementCandidate(candidates, seen, container, "nearby")
+        end
+    end
+
+    for _, container in ipairs(Search.getNearbyItemContainers(playerObj, 2)) do
+        addPlacementCandidate(candidates, seen, container, "ground-item")
+    end
+
+    for _, candidate in ipairs(floorCandidates) do
+        table.insert(candidates, candidate)
+    end
+
+    return candidates
 end
 
 function Search.getContainerLabel(container)
@@ -360,6 +431,20 @@ function Search.resolveItem(playerObj, descriptor, reservedItems)
     local inventoryItem = Search.findItemByDescriptor(playerObj:getInventory(), descriptor, reservedItems)
     if inventoryItem then
         return inventoryItem, "inventory"
+    end
+
+    local selectedContainer = Search.getSelectedLootContainer(playerObj)
+    if selectedContainer then
+        local selectedItem = Search.findItemByDescriptor(selectedContainer, descriptor, reservedItems)
+        if selectedItem then
+            return selectedItem, "selected"
+        end
+    end
+
+    local reachableLootContainers = Search.getReachableLootContainers(playerObj)
+    local lootWindowItem = Search.findBestItemInContainers(reachableLootContainers, descriptor, reservedItems)
+    if lootWindowItem then
+        return lootWindowItem, "loot-window"
     end
 
     local nearbyContainers = Search.getNearbyContainers(playerObj, 2)

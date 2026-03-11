@@ -30,6 +30,28 @@ local function isMakeupBodyLocation(location)
     return normalized:find("makeup", 1, true) ~= nil
 end
 
+local function isIgnoredWearLocation(location)
+    local normalized = string.lower(bodyLocationToString(location))
+    if normalized == "" then
+        return false
+    end
+
+    if IGNORED_BODY_LOCATIONS[normalized] then
+        return true
+    end
+
+    return normalized:find("makeup", 1, true) ~= nil
+        or normalized:find("hair", 1, true) ~= nil
+        or normalized:find("beard", 1, true) ~= nil
+        or normalized:find("stubble", 1, true) ~= nil
+        or normalized:find("moustache", 1, true) ~= nil
+        or normalized:find("mustache", 1, true) ~= nil
+        or normalized:find("eyebrow", 1, true) ~= nil
+        or normalized:find("eyelash", 1, true) ~= nil
+        or normalized:find("bodyhair", 1, true) ~= nil
+        or normalized:find("tattoo", 1, true) ~= nil
+end
+
 local function isMakeupItem(item)
     if not item then
         return false
@@ -55,8 +77,29 @@ local function isMakeupItem(item)
         or fullType:find("lipstick", 1, true) ~= nil
 end
 
+local function hasScriptDefinition(item)
+    if not item or not item.getFullType or not ScriptManager or not ScriptManager.instance then
+        return false
+    end
+
+    local fullType = tostring(item:getFullType() or "")
+    if fullType == "" then
+        return false
+    end
+
+    local ok, scriptItem = pcall(function()
+        return ScriptManager.instance:FindItem(fullType)
+    end)
+
+    return ok and scriptItem ~= nil
+end
+
 local function isSupportedWearableItem(item)
     if not item then
+        return false
+    end
+
+    if not hasScriptDefinition(item) then
         return false
     end
 
@@ -77,13 +120,20 @@ local function isSupportedWearableItem(item)
     return false
 end
 
+local getItemBodyLocation
+
 local function shouldIgnoreWornItem(wornItem, item)
     local bodyLocation = string.lower(bodyLocationToString(wornItem and wornItem:getLocation() or nil))
-    if IGNORED_BODY_LOCATIONS[bodyLocation] then
+    if isIgnoredWearLocation(bodyLocation) then
         return true
     end
 
     if not isSupportedWearableItem(item) then
+        return true
+    end
+
+    local sanitizedBodyLocation = getItemBodyLocation(item)
+    if sanitizedBodyLocation == "" or isIgnoredWearLocation(sanitizedBodyLocation) then
         return true
     end
 
@@ -129,7 +179,7 @@ local function sortDraftItems(items)
     end)
 end
 
-local function getItemBodyLocation(item)
+getItemBodyLocation = function(item)
     if not item then
         return ""
     end
@@ -139,9 +189,10 @@ local function getItemBodyLocation(item)
     end
 
     local location = ""
-    if (item.IsClothing and item:IsClothing()) or (item.IsInventoryContainer and item:IsInventoryContainer()) then
+    if (item.IsClothing and item:IsClothing()) then
         location = tostring(item:getBodyLocation() or "")
-    elseif item.canBeEquipped then
+    elseif (item.IsInventoryContainer and item:IsInventoryContainer()) or
+        (instanceof and instanceof(item, "AlarmClockClothing")) or item.canBeEquipped then
         location = tostring(item:canBeEquipped() or "")
 
         local normalized = string.lower(location)
@@ -157,7 +208,7 @@ local function getItemBodyLocation(item)
     if location == "nil" then
         return ""
     end
-    if isMakeupBodyLocation(location) then
+    if isIgnoredWearLocation(location) then
         return ""
     end
     return location
@@ -245,14 +296,17 @@ function Capture.captureWornItems(playerObj)
         local wornItem = wornItems:get(index)
         local item = wornItem and wornItem:getItem() or nil
         if item and not shouldIgnoreWornItem(wornItem, item) then
-            table.insert(items, {
-                fullType = item:getFullType(),
-                displayName = item:getDisplayName(),
-                bodyLocation = bodyLocationToString(wornItem:getLocation()),
-                itemType = item:getType(),
-                item = item,
-                included = true,
-            })
+            local bodyLocation = getItemBodyLocation(item)
+            if bodyLocation ~= "" then
+                table.insert(items, {
+                    fullType = item:getFullType(),
+                    displayName = item:getDisplayName(),
+                    bodyLocation = bodyLocation,
+                    itemType = item:getType(),
+                    item = item,
+                    included = true,
+                })
+            end
         end
     end
 

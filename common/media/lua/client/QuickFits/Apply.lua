@@ -126,6 +126,21 @@ local function queueUnequip(playerObj, item)
     ISTimedActionQueue.add(ISUnequipAction:new(playerObj, item, 50))
 end
 
+local function getTimedActionQueue(playerObj)
+    if not playerObj or not ISTimedActionQueue or type(ISTimedActionQueue.getTimedActionQueue) ~= "function" then
+        return nil
+    end
+
+    local ok, queue = pcall(function()
+        return ISTimedActionQueue.getTimedActionQueue(playerObj)
+    end)
+    if ok then
+        return queue
+    end
+
+    return nil
+end
+
 local function itemNeedsUnequip(playerObj, item)
     if not playerObj or not item then
         return false
@@ -187,6 +202,89 @@ local function queueMoveToContainer(playerObj, playerNum, item, targetContainer,
         targetContainer))
 end
 
+local function getTransferItemWeight(item)
+    if not item then
+        return 0
+    end
+
+    local okUnequippedWeight, unequippedWeight = pcall(function()
+        return item:getUnequippedWeight()
+    end)
+    if okUnequippedWeight and type(unequippedWeight) == "number" and unequippedWeight > 0 then
+        return unequippedWeight
+    end
+
+    local okActualWeight, actualWeight = pcall(function()
+        return item:getActualWeight()
+    end)
+    if okActualWeight and type(actualWeight) == "number" and actualWeight > 0 then
+        return actualWeight
+    end
+
+    return 0
+end
+
+local function canContainerFitTransferPlan(playerObj, container, transferPlan)
+    if not playerObj or not container then
+        return false
+    end
+
+    local containerType = string.lower(tostring(container:getType() or ""))
+    if containerType == "floor" then
+        return true
+    end
+
+    local okCapacity, capacity = pcall(function()
+        return container:getEffectiveCapacity(playerObj)
+    end)
+    local okCurrentWeight, currentWeight = pcall(function()
+        return container:getCapacityWeight()
+    end)
+
+    local remainingCapacity = nil
+    if okCapacity and okCurrentWeight and type(capacity) == "number" and type(currentWeight) == "number" then
+        remainingCapacity = capacity - currentWeight
+    end
+
+    for _, plan in ipairs(transferPlan or {}) do
+        local item = plan and plan.item or nil
+        if item then
+            local okAllowed, isAllowed = pcall(function()
+                return container:isItemAllowed(item)
+            end)
+            if okAllowed and not isAllowed then
+                return false
+            end
+
+            local okHasRoom, hasRoom = pcall(function()
+                return container:hasRoomFor(playerObj, item)
+            end)
+            if not okHasRoom or not hasRoom then
+                return false
+            end
+
+            if remainingCapacity ~= nil then
+                remainingCapacity = remainingCapacity - getTransferItemWeight(item)
+                if remainingCapacity < 0 then
+                    return false
+                end
+            end
+        end
+    end
+
+    return true
+end
+
+local function resolveBestPlacementTarget(playerObj, transferPlan)
+    for _, candidate in ipairs(Search.getPlacementCandidates(playerObj) or {}) do
+        if canContainerFitTransferPlan(playerObj, candidate.container, transferPlan) then
+            return candidate.container, candidate.source
+        end
+    end
+
+    return nil, nil
+end
+
 local function summarizeMissing(descriptor, list)
     table.insert(list, descriptor.displayName or descriptor.fullType)
 end
@@ -225,8 +323,52 @@ local function buildWearPlans(playerObj, outfit, wornByType, wornByLocation)
     return equipPlans, missing, blocked
 end
 
-local function setActionProgress(outfit, mode, entries, targetContainer)
-    if not outfit or not entries or #entries == 0 then
+local function createProgressPhase(mode, actionType, actionKey, entries, targetContainer)
+    if not entries or #entries == 0 then
+        return nil
+    end
+
+    return {
+        mode = mode,
+        actionType = actionType,
+        actionKey = actionKey,
+        entries = entries,
+        total = #entries,
+        targetContainer = targetContainer,
+    }
+end
+
+local function appendProgressPhase(phases, phase)
+    if phase then
+        table.insert(phases, phase)
+    end
+end
+
+local function setActionProgress(outfit, phases)
+    if not outfit or not phases then
+        Apply.lastWearProgress = nil
+        return
+    end
+
+    local normalizedPhases = {}
+    local phaseKeys = {}
+    for key, phase in pairs(phases) do
+        if type(key) == "number" and phase then
+            table.insert(phaseKeys, key)
+        end
+    end
+
+    table.sort(phaseKeys)
+
+    for _, key in ipairs(phaseKeys) do
+        local phase = phases[key]
+        if phase and phase.entries and #phase.entries > 0 then
+            phase.total = phase.total or #phase.entries
+            table.insert(normalizedPhases, phase)
+        end
+    end
+
+    if #normalizedPhases == 0 then
         Apply.lastWearProgress = nil
         return
     end
@@ -234,10 +376,7 @@ local function setActionProgress(outfit, mode, entries, targetContainer)
     Apply.lastWearProgress = {
         outfitId = outfit.id,
         outfitName = outfit.name,
-        mode = mode,
-        entries = entries,
-        total = #entries,
-        targetContainer = targetContainer,
+        phases = normalizedPhases,
     }
 end
 
@@ -245,6 +384,48 @@ function Apply.consumeLastWearProgress()
     local progress = Apply.lastWearProgress
     Apply.lastWearProgress = nil
     return progress
+end
+
+function Apply.isTimedActionQueueActive(playerObj)
+    local queue = getTimedActionQueue(playerObj)
+    if not queue then
+        return false
+    end
+
+    if queue.current then
+        return true
+    end
+
+    return queue.queue and #queue.queue > 0 or false
+end
+
+function Apply.getTimedActionQueueSnapshot(playerObj)
+    local queue = getTimedActionQueue(playerObj)
+    if not queue then
+        return nil
+    end
+
+    local actions = {}
+    for _, action in ipairs(queue.queue or {}) do
+        table.insert(actions, action)
+    end
+
+    return {
+        current = queue.current,
+        actions = actions,
+    }
+end
+
+function Apply.stopTimedActionQueue(playerObj)
+    if not playerObj or not ISTimedActionQueue or type(ISTimedActionQueue.clear) ~= "function" then
+        return false
+    end
+
+    local ok = pcall(function()
+        ISTimedActionQueue.clear(playerObj)
+    end)
+
+    return ok
 end
 
 function Apply.isOutfitFullyWorn(playerObj, outfit)
@@ -263,6 +444,7 @@ function Apply.applyReplacement(playerObj, outfit)
     local keepTypes = {}
     local equippedCount = 0
     local removedCount = 0
+    local removeEntries = {}
 
     for _, descriptor in ipairs(outfit.items or {}) do
         keepTypes[descriptor.fullType] = true
@@ -270,13 +452,22 @@ function Apply.applyReplacement(playerObj, outfit)
 
     for _, entry in ipairs(wornEntries) do
         if not keepTypes[entry.fullType] then
+            table.insert(removeEntries, {
+                item = entry.item,
+                displayName = entry.displayName,
+                fullType = entry.fullType,
+            })
             queueUnequip(playerObj, entry.item)
             removedCount = removedCount + 1
         end
     end
 
     local equipPlans, missing = buildWearPlans(playerObj, outfit, wornByType)
-    setActionProgress(outfit, "wear", equipPlans)
+    local phases = {}
+    appendProgressPhase(phases,
+        createProgressPhase("inventory", "ISUnequipAction", "progress_action_removing", removeEntries))
+    appendProgressPhase(phases, createProgressPhase("wear", "ISWearClothing", "progress_action_wearing", equipPlans))
+    setActionProgress(outfit, phases)
     for _, plan in ipairs(equipPlans) do
         queueWear(playerObj, playerNum, plan.item)
         equippedCount = equippedCount + 1
@@ -301,11 +492,17 @@ function Apply.applyAdditive(playerObj, outfit)
     local equipPlans = {}
     local missing = {}
     local removedItems = {}
+    local removeEntries = {}
 
     for _, descriptor in ipairs(buildOrderedDescriptors(outfit.items)) do
         if not wornByType[descriptor.fullType] then
             local blocker = descriptor.bodyLocation ~= "" and wornByLocation[descriptor.bodyLocation] or nil
             if blocker and blocker.fullType ~= descriptor.fullType and not removedItems[blocker.item] then
+                table.insert(removeEntries, {
+                    item = blocker.item,
+                    displayName = blocker.displayName,
+                    fullType = blocker.fullType,
+                })
                 queueUnequip(playerObj, blocker.item)
                 removedItems[blocker.item] = true
                 removedCount = removedCount + 1
@@ -332,7 +529,11 @@ function Apply.applyAdditive(playerObj, outfit)
     end
 
     sortPlansWithContainersLast(equipPlans)
-    setActionProgress(outfit, "wear", equipPlans)
+    local phases = {}
+    appendProgressPhase(phases,
+        createProgressPhase("inventory", "ISUnequipAction", "progress_action_removing", removeEntries))
+    appendProgressPhase(phases, createProgressPhase("wear", "ISWearClothing", "progress_action_wearing", equipPlans))
+    setActionProgress(outfit, phases)
     for _, plan in ipairs(equipPlans) do
         queueWear(playerObj, playerNum, plan.item)
         equippedCount = equippedCount + 1
@@ -353,11 +554,6 @@ function Apply.placeOutfitInContainer(playerObj, outfit)
     end
     if not outfit then
         return nil, Localization.getText("error_select_outfit_first")
-    end
-
-    local targetContainer, targetSource = Search.resolvePlacementContainer(playerObj)
-    if not targetContainer then
-        return nil, Localization.getText("error_no_container")
     end
 
     local playerNum = playerObj:getPlayerNum()
@@ -385,7 +581,15 @@ function Apply.placeOutfitInContainer(playerObj, outfit)
     end
 
     sortPlansWithContainersLast(transferPlan)
-    setActionProgress(outfit, "container", transferPlan, targetContainer)
+    local targetContainer, targetSource = resolveBestPlacementTarget(playerObj, transferPlan)
+    if not targetContainer then
+        return nil, Localization.getText("error_no_container")
+    end
+
+    setActionProgress(outfit, {
+        createProgressPhase("container", "ISInventoryTransferAction", "progress_action_moving", transferPlan,
+            targetContainer),
+    })
 
     for _, plan in ipairs(transferPlan) do
         queueMoveToContainer(playerObj, playerNum, plan.item, targetContainer, plan.sourceContainer)
@@ -427,7 +631,9 @@ function Apply.removeOutfitToInventory(playerObj, outfit)
         end
     end
 
-    setActionProgress(outfit, "inventory", removeEntries)
+    setActionProgress(outfit, {
+        createProgressPhase("inventory", "ISUnequipAction", "progress_action_removing", removeEntries),
+    })
 
     return {
         action = "remove",

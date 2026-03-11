@@ -32,6 +32,11 @@ local ICON_SIZE = 20
 local CLOSE_ICON_SIZE = 24
 local WORN_ICON_SIZE = 24
 local PROGRESS_HIDE_DELAY_MS = 2000
+local PROGRESS_STOP_GAP = 8
+local BOTTOM_SECTION_PADDING = 14
+local ACTION_ROW_HEIGHT = 30
+local PROGRESS_ROW_HEIGHT = 30
+local BOTTOM_ROW_GAP = 10
 
 local CLOSE_ICON = getTexture("X.png") or getTexture("42.13/X.png")
 local CLOSE_ICON_HOVER = getTexture("X_Hover.png") or getTexture("42.13/X_Hover.png") or CLOSE_ICON
@@ -171,6 +176,61 @@ local function drawProgressFillGradient(ui, x, y, width, height)
 
     -- Draw 1px shadow at bottom
     ui:drawRect(x, y + height - 1, width, 1, 0.85, 0.12, 0.38, 0.15)
+end
+
+local function drawInterruptedProgressFill(ui, x, y, width, height)
+    ui:drawRect(x, y, width, height, 0.94, 0.52, 0.12, 0.12)
+    ui:drawRect(x, y, width, 1, 0.96, 0.72, 0.24, 0.24)
+    ui:drawRect(x, y + height - 1, width, 1, 0.88, 0.34, 0.08, 0.08)
+end
+
+local function getProgressEntryDisplayName(entry)
+    if not entry then
+        return ""
+    end
+
+    local displayName = tostring(entry.displayName or "")
+    if displayName ~= "" then
+        return displayName
+    end
+
+    local item = entry.item
+    if item and item.getDisplayName then
+        local ok, itemDisplayName = pcall(function()
+            return item:getDisplayName()
+        end)
+        if ok and tostring(itemDisplayName or "") ~= "" then
+            return tostring(itemDisplayName)
+        end
+    end
+
+    return tostring(entry.fullType or "")
+end
+
+local function getFallbackPhaseForProgress(progress)
+    if not progress or not progress.entries or #progress.entries == 0 then
+        return nil
+    end
+
+    local actionType = "ISUnequipAction"
+    local actionKey = "progress_action_removing"
+    if progress.mode == "wear" then
+        actionType = "ISWearClothing"
+        actionKey = "progress_action_wearing"
+    elseif progress.mode == "container" then
+        actionType = "ISInventoryTransferAction"
+        actionKey = "progress_action_moving"
+    end
+
+    return {
+        mode = progress.mode,
+        actionType = actionType,
+        actionKey = actionKey,
+        entries = progress.entries,
+        total = progress.total or #progress.entries,
+        targetContainer = progress.targetContainer,
+        completed = progress.completed or 0,
+    }
 end
 
 local function getActualDraggedItems(items)
@@ -319,7 +379,7 @@ function OutfitManagerWindow.Open(playerNum)
     end
 
     local width = 920
-    local height = 620
+    local height = 676
     local uiState = Data.getWindowState(playerObj)
     local x = uiState.windowX or math.floor((getCore():getScreenWidth() - width) / 2)
     local y = uiState.windowY or math.floor((getCore():getScreenHeight() - height) / 2)
@@ -377,10 +437,14 @@ function OutfitManagerWindow:createChildren()
     local leftPaneW = 280
     local rightPaneX = leftPaneX + leftPaneW + 14
     local rightPaneW = self.width - rightPaneX - 12
-    local listHeight = self.height - headerY - 100
+    local outfitListY = headerY + 34
+    local itemListY = headerY + 119
+    local bottomSectionHeight = (ACTION_ROW_HEIGHT * 2) + PROGRESS_ROW_HEIGHT + (BOTTOM_ROW_GAP * 2) +
+        BOTTOM_SECTION_PADDING
+    local listHeight = self.height - outfitListY - bottomSectionHeight
 
     self.outfitListX = leftPaneX
-    self.outfitListY = headerY + 34
+    self.outfitListY = outfitListY
     self.outfitListW = leftPaneW
     self.outfitListH = listHeight
     self.leftPaneX = leftPaneX
@@ -405,9 +469,9 @@ function OutfitManagerWindow:createChildren()
     self:addChild(self.saveButton)
 
     self.itemListX = rightPaneX
-    self.itemListY = headerY + 119
+    self.itemListY = itemListY
     self.itemListW = rightPaneW
-    self.itemListH = self.height - (headerY + 118) - 110
+    self.itemListH = self.height - itemListY - (bottomSectionHeight + 11)
 
     self.captureButton = ISButton:new(rightPaneX, self.itemListY + self.itemListH + 8, 140, 30, "",
         self,
@@ -427,28 +491,28 @@ function OutfitManagerWindow:createChildren()
 
     self:createDraftItemListWidget()
 
-    self.wearButton = ISButton:new(leftPaneX, self.height - 54, 90, 30, "", self, self.onWear)
+    self.wearButton = ISButton:new(leftPaneX, self.height - 94, 90, 30, "", self, self.onWear)
     self.wearButton:initialise()
     self.wearButton:instantiate()
     self.wearButton.borderColor = { r = 0.3, g = 0.65, b = 0.3, a = 0.9 }
     self.wearButton.backgroundColor = { r = 0.08, g = 0.2, b = 0.08, a = 0.95 }
     self:addChild(self.wearButton)
 
-    self.addButton = ISButton:new(leftPaneX + 100, self.height - 54, 90, 30, "", self, self.onAdd)
+    self.addButton = ISButton:new(leftPaneX + 100, self.height - 94, 90, 30, "", self, self.onAdd)
     self.addButton:initialise()
     self.addButton:instantiate()
     self.addButton.borderColor = { r = 0.3, g = 0.5, b = 0.68, a = 0.9 }
     self.addButton.backgroundColor = { r = 0.08, g = 0.13, b = 0.22, a = 0.95 }
     self:addChild(self.addButton)
 
-    self.removeButton = ISButton:new(leftPaneX + 200, self.height - 54, 100, 30, "", self, self.onRemove)
+    self.removeButton = ISButton:new(leftPaneX + 218, self.height - 94, 100, 30, "", self, self.onRemove)
     self.removeButton:initialise()
     self.removeButton:instantiate()
     self.removeButton.borderColor = { r = 0.7, g = 0.5, b = 0.22, a = 0.9 }
     self.removeButton.backgroundColor = { r = 0.2, g = 0.12, b = 0.04, a = 0.95 }
     self:addChild(self.removeButton)
 
-    self.placeButton = ISButton:new(leftPaneX + 310, self.height - 54, 160, 30, "", self,
+    self.placeButton = ISButton:new(leftPaneX + 328, self.height - 94, 160, 30, "", self,
         self.onPlaceInContainer)
     self.placeButton:initialise()
     self.placeButton:instantiate()
@@ -463,6 +527,14 @@ function OutfitManagerWindow:createChildren()
     self.deleteButton.borderColor = { r = 0.65, g = 0.25, b = 0.25, a = 0.9 }
     self.deleteButton.backgroundColor = { r = 0.2, g = 0.08, b = 0.08, a = 0.95 }
     self:addChild(self.deleteButton)
+
+    self.stopProgressButton = ISButton:new(self.width - 88, self.height - 44, 76, 30, "", self, self.onStopProgress)
+    self.stopProgressButton:initialise()
+    self.stopProgressButton:instantiate()
+    self.stopProgressButton.borderColor = { r = 0.72, g = 0.28, b = 0.28, a = 0.92 }
+    self.stopProgressButton.backgroundColor = { r = 0.24, g = 0.08, b = 0.08, a = 0.96 }
+    self.stopProgressButton:setVisible(false)
+    self:addChild(self.stopProgressButton)
 
     if Data.isDebugMode() then
         self.languageCombo = ISComboBox:new(rightPaneX + rightPaneW - 190, headerY, 180, 24, self,
@@ -531,10 +603,11 @@ function OutfitManagerWindow:layoutLocalizedControls()
     self.captureButton:setWidth(captureWidth)
     self.captureButton:setX(self.rightPaneX)
 
-    local actionY = self.height - 54
+    local actionY = self.height - (BOTTOM_SECTION_PADDING + PROGRESS_ROW_HEIGHT + BOTTOM_ROW_GAP + ACTION_ROW_HEIGHT)
+    local progressY = self.height - (BOTTOM_SECTION_PADDING + PROGRESS_ROW_HEIGHT)
     local rowGap = 8
-    local minActionSpacing = 8
-    local maxActionSpacing = 8
+    local minActionSpacing = 6
+    local maxActionSpacing = 18
     local actionAreaWidth = self.width - (self.leftPaneX * 2)
     local actionButtons = {
         { button = self.wearButton,   width = measureButtonWidth(tr("button_wear"), 90, 28) },
@@ -542,6 +615,37 @@ function OutfitManagerWindow:layoutLocalizedControls()
         { button = self.removeButton, width = measureButtonWidth(tr("button_take_off"), 100, 28) },
         { button = self.placeButton,  width = measureButtonWidth(tr("button_place_container"), 160, 32) },
     }
+    local preferredGaps = { 6, 14, 6 }
+    local preferredWidth = 0
+    for index, spec in ipairs(actionButtons) do
+        preferredWidth = preferredWidth + spec.width + (preferredGaps[index] or 0)
+    end
+
+    if preferredWidth <= actionAreaWidth then
+        local x = self.leftPaneX
+        local widestRightEdge = self.leftPaneX
+        for index, spec in ipairs(actionButtons) do
+            spec.button:setX(x)
+            spec.button:setY(actionY)
+            spec.button:setWidth(spec.width)
+            widestRightEdge = math.max(widestRightEdge, spec.button:getRight())
+            x = x + spec.width + (preferredGaps[index] or 0)
+        end
+
+        self.actionButtonsRightEdge = widestRightEdge
+        self.actionButtonsBaseY = actionY
+        self.progressBarY = progressY
+        self.progressBarX = self.leftPaneX
+
+        self:updateProgressButtonLayout()
+
+        if self.languageCombo then
+            self.languageCombo:setX(self.rightPaneX + self.rightPaneW - self.languageCombo:getWidth() - 10)
+            self.languageCombo:setY(self.headerY)
+        end
+        return
+    end
+
     local actionRows = { {}, {} }
     local currentRow = 1
     local currentWidth = 0
@@ -590,11 +694,32 @@ function OutfitManagerWindow:layoutLocalizedControls()
 
     self.actionButtonsRightEdge = widestRightEdge
     self.actionButtonsBaseY = actionY
+    self.progressBarY = progressY
+    self.progressBarX = self.leftPaneX
+
+    self:updateProgressButtonLayout()
 
     if self.languageCombo then
         self.languageCombo:setX(self.rightPaneX + self.rightPaneW - self.languageCombo:getWidth() - 10)
         self.languageCombo:setY(self.headerY)
     end
+end
+
+function OutfitManagerWindow:updateProgressButtonLayout()
+    if not self.stopProgressButton then
+        return
+    end
+
+    local buttonWidth = measureButtonWidth(tr("button_stop"), 72, 22)
+    local buttonX = self.width - buttonWidth - 12
+    local buttonY = self.progressBarY or (self.height - (BOTTOM_SECTION_PADDING + PROGRESS_ROW_HEIGHT))
+    local isVisible = self.activeProgress ~= nil and self.activeProgress.state == "active" and
+        (self.activeProgress.total or 0) > 0
+
+    self.stopProgressButton:setWidth(buttonWidth)
+    self.stopProgressButton:setX(buttonX)
+    self.stopProgressButton:setY(buttonY)
+    self.stopProgressButton:setVisible(isVisible)
 end
 
 function OutfitManagerWindow:applyLocalizedText()
@@ -606,6 +731,7 @@ function OutfitManagerWindow:applyLocalizedText()
     setButtonLabel(self.removeButton, tr("button_take_off"))
     setButtonLabel(self.placeButton, tr("button_place_container"))
     setButtonLabel(self.deleteButton, tr("button_delete"))
+    setButtonLabel(self.stopProgressButton, tr("button_stop"))
 
     self.wearButton.tooltip = tr("tooltip_wear")
     self.addButton.tooltip = tr("tooltip_add")
@@ -872,22 +998,236 @@ function OutfitManagerWindow:getActionProgressCount(progress)
     return matchedCount, #entries
 end
 
+function OutfitManagerWindow:getActiveProgressPhase()
+    if not self.activeProgress then
+        return nil
+    end
+
+    local phases = self.activeProgress.phases
+    local index = self.activeProgress.phaseIndex or 1
+    return phases and phases[index] or nil
+end
+
+function OutfitManagerWindow:syncActiveProgressPhaseState(currentEntryName)
+    if not self.activeProgress then
+        return
+    end
+
+    local phase = self:getActiveProgressPhase()
+    if not phase then
+        self.activeProgress.mode = nil
+        self.activeProgress.entries = nil
+        self.activeProgress.targetContainer = nil
+        self.activeProgress.total = 0
+        self.activeProgress.completed = 0
+        self.activeProgress.phaseActionKey = nil
+        self.activeProgress.currentEntryName = nil
+        return
+    end
+
+    self.activeProgress.mode = phase.mode
+    self.activeProgress.entries = phase.entries
+    self.activeProgress.targetContainer = phase.targetContainer
+    self.activeProgress.total = phase.total or #(phase.entries or {})
+    self.activeProgress.completed = math.min(phase.completed or 0, self.activeProgress.total)
+    self.activeProgress.phaseActionKey = phase.actionKey
+    self.activeProgress.currentEntryName = currentEntryName or phase.currentEntryName
+end
+
+function OutfitManagerWindow:advanceWearProgressPhase()
+    if not self.activeProgress then
+        return false
+    end
+
+    local currentPhase = self:getActiveProgressPhase()
+    if currentPhase then
+        currentPhase.completed = currentPhase.total or #(currentPhase.entries or {})
+    end
+
+    local phases = self.activeProgress.phases or {}
+    local nextIndex = (self.activeProgress.phaseIndex or 1) + 1
+    while nextIndex <= #phases do
+        local nextPhase = phases[nextIndex]
+        if nextPhase and nextPhase.entries and #nextPhase.entries > 0 then
+            self.activeProgress.phaseIndex = nextIndex
+            nextPhase.completed = nextPhase.completed or 0
+            nextPhase.currentEntryName = nil
+            self:syncActiveProgressPhaseState()
+            self:updateProgressButtonLayout()
+            return true
+        end
+
+        nextIndex = nextIndex + 1
+    end
+
+    return false
+end
+
+function OutfitManagerWindow:getQueueBackedProgressCount(phase)
+    if not phase or not phase.entries or #phase.entries == 0 then
+        return 0, nil
+    end
+
+    local entryLookup = {}
+    for _, entry in ipairs(phase.entries) do
+        if entry.item then
+            entryLookup[entry.item] = entry
+        end
+    end
+
+    local snapshot = Apply.getTimedActionQueueSnapshot and Apply.getTimedActionQueueSnapshot(self.playerObj) or nil
+    local remaining = 0
+    local queuedEntry = nil
+    local matchedActionCount = 0
+    local stateCompleted = self:getActionProgressCount(phase)
+
+    local function countQueuedTransferEntries(action)
+        local queueList = action and action.queueList or nil
+        if not queueList then
+            return 0, nil
+        end
+
+        local count = 0
+        local firstEntry = nil
+        local seenItems = {}
+
+        for _, queuedGroup in ipairs(queueList) do
+            for _, queuedItem in ipairs(queuedGroup.items or {}) do
+                if queuedItem and not seenItems[queuedItem] then
+                    seenItems[queuedItem] = true
+                    local entry = entryLookup[queuedItem]
+                    if entry then
+                        count = count + 1
+                        if not firstEntry then
+                            firstEntry = entry
+                        end
+                    end
+                end
+            end
+        end
+
+        return count, firstEntry
+    end
+
+    if snapshot and snapshot.actions then
+        local seenActions = {}
+        local expectedActionType = tostring(phase.actionType or "")
+
+        local function scanQueuedAction(action)
+            if not action or seenActions[action] then
+                return
+            end
+
+            seenActions[action] = true
+
+            local actionType = tostring(action and action.Type or "")
+            local actionItem = action and action.item or nil
+            local entry = actionItem and entryLookup[actionItem] or nil
+            if not entry then
+                return
+            end
+
+            local isPrimaryPhaseAction = actionType == expectedActionType
+            local isWearTransferAction = phase.mode == "wear" and actionType == "ISInventoryTransferAction"
+
+            if isPrimaryPhaseAction or isWearTransferAction then
+                if not queuedEntry then
+                    queuedEntry = entry
+                end
+            end
+
+            if isPrimaryPhaseAction then
+                if actionType == "ISInventoryTransferAction" then
+                    local queuedCount, transferEntry = countQueuedTransferEntries(action)
+                    if queuedCount > 0 then
+                        matchedActionCount = matchedActionCount + queuedCount
+                        remaining = remaining + queuedCount
+                        if not queuedEntry then
+                            queuedEntry = transferEntry
+                        end
+                    else
+                        matchedActionCount = matchedActionCount + 1
+                        remaining = remaining + 1
+                    end
+                else
+                    matchedActionCount = matchedActionCount + 1
+                    remaining = remaining + 1
+                end
+            end
+        end
+
+        scanQueuedAction(snapshot.current)
+        for _, action in ipairs(snapshot.actions) do
+            scanQueuedAction(action)
+        end
+    end
+
+    local completed = stateCompleted
+    if matchedActionCount > 0 then
+        completed = math.max(completed, math.max((phase.total or #phase.entries) - remaining, 0))
+    end
+
+    return math.min(completed, phase.total or #phase.entries), queuedEntry
+end
+
 function OutfitManagerWindow:beginWearProgress(progress)
-    if not progress or not progress.entries or #progress.entries == 0 then
+    local phases = {}
+    if progress and progress.phases then
+        for _, phase in ipairs(progress.phases) do
+            if phase and phase.entries and #phase.entries > 0 then
+                table.insert(phases, phase)
+            end
+        end
+    else
+        local fallbackPhase = getFallbackPhaseForProgress(progress)
+        if fallbackPhase then
+            table.insert(phases, fallbackPhase)
+        end
+    end
+
+    if #phases == 0 then
         self.activeProgress = nil
+        self:updateProgressButtonLayout()
         return
     end
 
     self.activeProgress = {
         outfitId = progress.outfitId,
         outfitName = progress.outfitName,
-        mode = progress.mode,
-        entries = progress.entries,
-        targetContainer = progress.targetContainer,
-        total = progress.total or #progress.entries,
+        phases = phases,
+        phaseIndex = 1,
         completed = 0,
-        completedAt = nil,
+        total = phases[1].total or #(phases[1].entries or {}),
+        endedAt = nil,
+        state = "active",
     }
+
+    self:syncActiveProgressPhaseState()
+    self:updateProgressButtonLayout()
+end
+
+function OutfitManagerWindow:setProgressEnded(state)
+    if not self.activeProgress then
+        return
+    end
+
+    self.activeProgress.state = state
+    self.activeProgress.endedAt = nowMs()
+    if state == "completed" then
+        local phase = self:getActiveProgressPhase()
+        if phase then
+            phase.completed = phase.total or #(phase.entries or {})
+        end
+        self:syncActiveProgressPhaseState()
+        self.activeProgress.completed = self.activeProgress.total or self.activeProgress.completed or 0
+    end
+
+    self:updateProgressButtonLayout()
+end
+
+function OutfitManagerWindow:clearWearProgress()
+    self.activeProgress = nil
+    self:updateProgressButtonLayout()
 end
 
 function OutfitManagerWindow:updateWearProgress()
@@ -895,24 +1235,41 @@ function OutfitManagerWindow:updateWearProgress()
         return
     end
 
-    local completed, total = self:getActionProgressCount(self.activeProgress)
-    self.activeProgress.completed = completed
-    self.activeProgress.total = total
+    if self.activeProgress.state ~= "active" then
+        if nowMs() >= ((self.activeProgress.endedAt or nowMs()) + PROGRESS_HIDE_DELAY_MS) then
+            self:clearWearProgress()
+        end
+        return
+    end
+
+    local phase = self:getActiveProgressPhase()
+    if not phase then
+        self:clearWearProgress()
+        return
+    end
+
+    local total = phase.total or #(phase.entries or {})
+    local completed, queuedEntry = self:getQueueBackedProgressCount(phase)
+    phase.completed = completed
+    phase.currentEntryName = getProgressEntryDisplayName(queuedEntry)
+    self:syncActiveProgressPhaseState(phase.currentEntryName)
 
     if total <= 0 then
-        self.activeProgress = nil
+        if not self:advanceWearProgressPhase() then
+            self:clearWearProgress()
+        end
         return
     end
 
     if completed >= total then
-        self.activeProgress.completed = total
-        if not self.activeProgress.completedAt then
-            self.activeProgress.completedAt = nowMs()
-        elseif nowMs() >= (self.activeProgress.completedAt + PROGRESS_HIDE_DELAY_MS) then
-            self.activeProgress = nil
+        if not self:advanceWearProgressPhase() then
+            self:setProgressEnded("completed")
         end
-    else
-        self.activeProgress.completedAt = nil
+        return
+    end
+
+    if not Apply.isTimedActionQueueActive(self.playerObj) then
+        self:setProgressEnded("interrupted")
     end
 end
 
@@ -921,24 +1278,47 @@ function OutfitManagerWindow:drawWearProgressBar()
         return
     end
 
-    local barX = math.max((self.actionButtonsRightEdge or 482) + 18, 500)
-    local barY = self.actionButtonsBaseY or (self.height - 54)
-    local barW = self.width - barX - 12
-    local barH = 30
+    local barX = self.progressBarX or self.leftPaneX or 12
+    local barY = self.progressBarY or (self.height - (BOTTOM_SECTION_PADDING + PROGRESS_ROW_HEIGHT))
+    local reserveStopSpace = self.activeProgress.state == "active"
+    local stopButtonWidth = reserveStopSpace and
+        (self.stopProgressButton and self.stopProgressButton:getWidth() or measureButtonWidth(tr("button_stop"), 72, 22))
+        or 0
+    local stopGap = reserveStopSpace and PROGRESS_STOP_GAP or 0
+    local barW = self.width - barX - 12 - stopButtonWidth - stopGap
+    local barH = PROGRESS_ROW_HEIGHT
     if barW <= 2 then
         return
     end
+
+    local isInterrupted = self.activeProgress.state == "interrupted"
     local completed = math.min(self.activeProgress.completed or 0, self.activeProgress.total or 0)
     local total = math.max(self.activeProgress.total or 0, 1)
     local fillW = math.floor((barW - 2) * (completed / total))
 
-    self:drawRect(barX, barY, barW, barH, 0.4, 0.06, 0.08, 0.1)
-    self:drawRectBorder(barX, barY, barW, barH, 0.45, 0.28, 0.34, 0.32)
-    if fillW > 0 then
-        drawProgressFillGradient(self, barX + 1, barY + 1, fillW, barH - 2)
+    if isInterrupted then
+        self:drawRect(barX, barY, barW, barH, 0.46, 0.12, 0.03, 0.03)
+        self:drawRectBorder(barX, barY, barW, barH, 0.68, 0.62, 0.18, 0.18)
+        drawInterruptedProgressFill(self, barX + 1, barY + 1, barW - 2, barH - 2)
+    else
+        self:drawRect(barX, barY, barW, barH, 0.4, 0.06, 0.08, 0.1)
+        self:drawRectBorder(barX, barY, barW, barH, 0.45, 0.28, 0.34, 0.32)
+        if fillW > 0 then
+            drawProgressFillGradient(self, barX + 1, barY + 1, fillW, barH - 2)
+        end
     end
 
-    self:drawTextCentre(string.format("%d / %d", completed, total), barX + math.floor(barW / 2), barY + 1,
+    local actionText = tr(self.activeProgress.phaseActionKey or "progress_action_wearing")
+    local currentEntryName = tostring(self.activeProgress.currentEntryName or "")
+    local label = ""
+    if isInterrupted then
+        label = tr("progress_interrupted_phase", actionText, completed, total)
+    elseif currentEntryName ~= "" then
+        label = tr("progress_status_with_item", actionText, currentEntryName, completed, total)
+    else
+        label = tr("progress_status_count", actionText, completed, total)
+    end
+    self:drawTextCentre(label, barX + math.floor(barW / 2), barY + 1,
         0.96, 0.94, 0.9, 1, UIFont.Small)
 end
 
@@ -1045,12 +1425,14 @@ function OutfitManagerWindow:render()
         self:drawText("X", closeX + 4, closeY - 1, 0.95, 0.9, 0.88, 1, UIFont.Medium)
     end
 
-    self:drawRect(12, self.headerHeight + 8, 280, self.height - self.headerHeight - 78, 0.2, 0.1, 0.1, 0.12)
-    self:drawRectBorder(12, self.headerHeight + 8, 280, self.height - self.headerHeight - 78, 0.22, 0.36, 0.32, 0.2)
-    self:drawRect(306, self.headerHeight + 8, self.width - 318, self.height - self.headerHeight - 78, 0.16, 0.1, 0.1,
-        0.12)
-    self:drawRectBorder(306, self.headerHeight + 8, self.width - 318, self.height - self.headerHeight - 78, 0.2, 0.36,
-        0.32, 0.2)
+    local paneTopY = self.headerHeight + 8
+    local paneBottomY = (self.actionButtonsBaseY or (self.height - 84)) - 12
+    local paneHeight = math.max(0, paneBottomY - paneTopY)
+
+    self:drawRect(12, paneTopY, 280, paneHeight, 0.2, 0.1, 0.1, 0.12)
+    self:drawRectBorder(12, paneTopY, 280, paneHeight, 0.22, 0.36, 0.32, 0.2)
+    self:drawRect(306, paneTopY, self.width - 318, paneHeight, 0.16, 0.1, 0.1, 0.12)
+    self:drawRectBorder(306, paneTopY, self.width - 318, paneHeight, 0.2, 0.36, 0.32, 0.2)
 
     self:drawText(tr("label_outfits"), 20, self.headerHeight + 12, 0.92, 0.86, 0.68, 1, UIFont.Small)
     self:drawText(getEditorTitle(self), 308, self.headerHeight + 10, 0.92, 0.86, 0.68, 1, UIFont.Small)
@@ -1063,7 +1445,7 @@ function OutfitManagerWindow:render()
     self:drawRect(310, self.headerHeight + 100, self.width - 326, 1, 0.16, 0.38, 0.34, 0.2)
     self:drawText(tr("label_items_in_outfit"), 308, self.headerHeight + 104, 0.6, 0.58, 0.5, 1, UIFont.Small)
 
-    self:drawRect(12, self.height - 64, self.width - 24, 1, 0.14, 0.32, 0.3, 0.18)
+    self:drawRect(12, paneBottomY + 4, self.width - 24, 1, 0.14, 0.32, 0.3, 0.18)
 
     self:drawDraftDropHint()
     self:drawWearProgressBar()
@@ -1494,4 +1876,13 @@ function OutfitManagerWindow:onRemove()
 
     local summary, isError = summarizeResult(selected, result)
     self:setStatus(summary, isError)
+end
+
+function OutfitManagerWindow:onStopProgress()
+    if not self.activeProgress or self.activeProgress.state ~= "active" then
+        return
+    end
+
+    Apply.stopTimedActionQueue(self.playerObj)
+    self:setProgressEnded("interrupted")
 end
