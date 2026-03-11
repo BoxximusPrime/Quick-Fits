@@ -8,8 +8,28 @@ QuickFits.Search = QuickFits.Search or {}
 local Search = QuickFits.Search
 local Localization = QuickFits.Localization
 
-local function isFloorContainer(container)
+local isFloorContainer
+
+isFloorContainer = function(container)
     return container and string.lower(tostring(container:getType() or "")) == "floor"
+end
+
+local function getContainerType(container)
+    if not container then
+        return ""
+    end
+
+    local okType, rawType = pcall(function()
+        return container:getType()
+    end)
+    return string.lower(tostring(okType and rawType or ""))
+end
+
+local function isPseudoLootAggregate(container)
+    local containerType = getContainerType(container)
+    return containerType == "proxinv"
+        or containerType == "proximityinventory"
+        or containerType == "lootwindow"
 end
 
 local function canTraverseItemInventory(item)
@@ -122,6 +142,10 @@ local function addContainer(containers, seen, container)
         return
     end
 
+    if isPseudoLootAggregate(container) then
+        return
+    end
+
     if seen[container] then
         return
     end
@@ -141,6 +165,10 @@ end
 
 local function addPlacementCandidate(candidates, seen, container, source)
     if not container or seen[container] then
+        return
+    end
+
+    if isPseudoLootAggregate(container) then
         return
     end
 
@@ -291,6 +319,9 @@ function Search.getSelectedLootContainer(playerObj)
     if not container or container == playerObj:getInventory() then
         return nil
     end
+    if isPseudoLootAggregate(container) then
+        return nil
+    end
     if isFloorContainer(container) then
         return nil
     end
@@ -324,6 +355,10 @@ function Search.resolvePlacementContainer(playerObj)
         return selectedContainer, "selected"
     end
 
+    for _, container in ipairs(Search.getReachableLootContainers(playerObj)) do
+        return container, "loot-window"
+    end
+
     for _, container in ipairs(Search.getNearbyContainers(playerObj, 2)) do
         if not isFloorContainer(container) then
             return container, "nearby"
@@ -346,6 +381,10 @@ function Search.getPlacementCandidates(playerObj)
         addPlacementCandidate(candidates, seen, selectedContainer, "selected")
     end
 
+    for _, container in ipairs(Search.getReachableLootContainers(playerObj)) do
+        addPlacementCandidate(candidates, seen, container, "loot-window")
+    end
+
     local floorCandidates = {}
     for _, container in ipairs(Search.getNearbyContainers(playerObj, 2)) do
         if isFloorContainer(container) then
@@ -364,6 +403,39 @@ function Search.getPlacementCandidates(playerObj)
     end
 
     return candidates
+end
+
+function Search.getExternalSearchContainers(playerObj)
+    local containers = {}
+    local seen = {}
+
+    local selectedContainer = Search.getSelectedLootContainer(playerObj)
+    if selectedContainer then
+        addContainer(containers, seen, selectedContainer)
+    end
+
+    for _, container in ipairs(Search.getReachableLootContainers(playerObj)) do
+        addContainer(containers, seen, container)
+    end
+
+    local floorContainers = {}
+    for _, container in ipairs(Search.getNearbyContainers(playerObj, 2)) do
+        if isFloorContainer(container) then
+            addContainer(floorContainers, seen, container)
+        else
+            addContainer(containers, seen, container)
+        end
+    end
+
+    for _, container in ipairs(Search.getNearbyItemContainers(playerObj, 2)) do
+        addContainer(containers, seen, container)
+    end
+
+    for _, container in ipairs(floorContainers) do
+        table.insert(containers, container)
+    end
+
+    return containers
 end
 
 function Search.getContainerLabel(container)
@@ -467,6 +539,18 @@ function Search.resolveItem(playerObj, descriptor, reservedItems)
     local floorItem = Search.findBestItemInContainers(groundPool, descriptor, reservedItems)
     if floorItem then
         return floorItem, "ground"
+    end
+
+    return nil, nil
+end
+
+function Search.resolveExternalItem(playerObj, descriptor, reservedItems)
+    reservedItems = reservedItems or {}
+
+    local bestMatch = Search.findBestItemInContainers(Search.getExternalSearchContainers(playerObj), descriptor,
+        reservedItems)
+    if bestMatch then
+        return bestMatch, "external"
     end
 
     return nil, nil

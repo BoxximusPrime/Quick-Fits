@@ -65,6 +65,9 @@ local function buildOrderedDescriptors(items)
     return ordered
 end
 
+local createProgressPhase
+local appendProgressPhase
+
 local function sortPlansWithContainersLast(plans)
     table.sort(plans, function(left, right)
         local leftIsContainer = left.isContainerLike == true
@@ -88,17 +91,22 @@ local function getWornState(playerObj)
     for index = 0, wornItems:size() - 1 do
         local wornItem = wornItems:get(index)
         local item = wornItem and wornItem:getItem() or nil
-        if item and Capture.isSupportedWearableItem(item) and not Capture.shouldIgnoreWornItem(wornItem, item) then
-            local entry = {
-                item = item,
-                fullType = item:getFullType(),
-                displayName = item:getDisplayName(),
-                bodyLocation = tostring(wornItem:getLocation() or ""),
-            }
-            table.insert(entries, entry)
-            byFullType[entry.fullType] = entry
-            if entry.bodyLocation ~= "" then
-                byLocation[entry.bodyLocation] = entry
+        if item then
+            local isSupported = Capture.isSupportedWearableItem(item)
+            local isIgnored = Capture.shouldIgnoreWornItem(wornItem, item)
+
+            if isSupported and not isIgnored then
+                local entry = {
+                    item = item,
+                    fullType = item:getFullType(),
+                    displayName = item:getDisplayName(),
+                    bodyLocation = tostring(wornItem:getLocation() or ""),
+                }
+                table.insert(entries, entry)
+                byFullType[entry.fullType] = entry
+                if entry.bodyLocation ~= "" then
+                    byLocation[entry.bodyLocation] = entry
+                end
             end
         end
     end
@@ -197,7 +205,14 @@ local function queueMoveToContainer(playerObj, playerNum, item, targetContainer,
         return
     end
 
-    luautils.walkToContainer(targetContainer, playerNum)
+    local walkContainer = targetContainer
+    if targetContainer == playerObj:getInventory() then
+        walkContainer = sourceContainer
+    end
+
+    if walkContainer and walkContainer ~= playerObj:getInventory() then
+        luautils.walkToContainer(walkContainer, playerNum)
+    end
     ISTimedActionQueue.add(ISInventoryTransferUtil.newInventoryTransferAction(playerObj, item, sourceContainer,
         targetContainer))
 end
@@ -275,6 +290,61 @@ local function canContainerFitTransferPlan(playerObj, container, transferPlan)
     return true
 end
 
+local function getContainerRemainingCapacity(playerObj, container)
+    if not playerObj or not container then
+        return nil
+    end
+
+    local containerType = string.lower(tostring(container:getType() or ""))
+    if containerType == "floor" then
+        return nil
+    end
+
+    local okCapacity, capacity = pcall(function()
+        return container:getEffectiveCapacity(playerObj)
+    end)
+    local okCurrentWeight, currentWeight = pcall(function()
+        return container:getCapacityWeight()
+    end)
+
+    if okCapacity and okCurrentWeight and type(capacity) == "number" and type(currentWeight) == "number" then
+        return capacity - currentWeight
+    end
+
+    return nil
+end
+
+local function canContainerAcceptTransferItem(playerObj, container, item, remainingCapacity)
+    if not playerObj or not container or not item then
+        return false
+    end
+
+    local containerType = string.lower(tostring(container:getType() or ""))
+    if containerType == "floor" then
+        return true
+    end
+
+    local okAllowed, isAllowed = pcall(function()
+        return container:isItemAllowed(item)
+    end)
+    if okAllowed and not isAllowed then
+        return false
+    end
+
+    local okHasRoom, hasRoom = pcall(function()
+        return container:hasRoomFor(playerObj, item)
+    end)
+    if not okHasRoom or not hasRoom then
+        return false
+    end
+
+    if remainingCapacity ~= nil then
+        return getTransferItemWeight(item) <= remainingCapacity
+    end
+
+    return true
+end
+
 local function resolveBestPlacementTarget(playerObj, transferPlan)
     for _, candidate in ipairs(Search.getPlacementCandidates(playerObj) or {}) do
         if canContainerFitTransferPlan(playerObj, candidate.container, transferPlan) then
@@ -283,6 +353,73 @@ local function resolveBestPlacementTarget(playerObj, transferPlan)
     end
 
     return nil, nil
+end
+
+local function buildPlacementPhases(playerObj, transferPlan)
+    local phases = {}
+    local candidates = Search.getPlacementCandidates(playerObj) or {}
+    local remainingPlans = {}
+    for _, plan in ipairs(transferPlan or {}) do
+        table.insert(remainingPlans, plan)
+    end
+
+    local nonFloorCandidates = {}
+    local spillCandidate = nil
+
+    for _, candidate in ipairs(candidates) do
+        local containerType = string.lower(tostring(candidate.container and candidate.container:getType() or ""))
+        if containerType == "floor" then
+            if not spillCandidate then
+                spillCandidate = candidate
+            end
+        else
+            table.insert(nonFloorCandidates, candidate)
+        end
+    end
+
+    local primaryTargetLabel = nil
+    local primaryTargetSource = nil
+
+    local function assignToCandidate(candidate)
+        if not candidate or #remainingPlans == 0 then
+            return
+        end
+
+        local phaseEntries = {}
+        local nextRemaining = {}
+        local remainingCapacity = getContainerRemainingCapacity(playerObj, candidate.container)
+
+        for _, plan in ipairs(remainingPlans) do
+            if canContainerAcceptTransferItem(playerObj, candidate.container, plan.item, remainingCapacity) then
+                table.insert(phaseEntries, plan)
+                if remainingCapacity ~= nil then
+                    remainingCapacity = remainingCapacity - getTransferItemWeight(plan.item)
+                end
+            else
+                table.insert(nextRemaining, plan)
+            end
+        end
+
+        if #phaseEntries > 0 then
+            appendProgressPhase(phases,
+                createProgressPhase("container", "ISInventoryTransferAction", "progress_action_moving", phaseEntries,
+                    candidate.container))
+
+            if not primaryTargetLabel and candidate.container then
+                primaryTargetLabel = Search.getContainerLabel(candidate.container)
+                primaryTargetSource = candidate.source
+            end
+        end
+
+        remainingPlans = nextRemaining
+    end
+
+    for _, candidate in ipairs(nonFloorCandidates) do
+        assignToCandidate(candidate)
+    end
+    assignToCandidate(spillCandidate)
+
+    return phases, remainingPlans, primaryTargetLabel, primaryTargetSource
 end
 
 local function summarizeMissing(descriptor, list)
@@ -323,7 +460,7 @@ local function buildWearPlans(playerObj, outfit, wornByType, wornByLocation)
     return equipPlans, missing, blocked
 end
 
-local function createProgressPhase(mode, actionType, actionKey, entries, targetContainer)
+createProgressPhase = function(mode, actionType, actionKey, entries, targetContainer)
     if not entries or #entries == 0 then
         return nil
     end
@@ -338,7 +475,7 @@ local function createProgressPhase(mode, actionType, actionKey, entries, targetC
     }
 end
 
-local function appendProgressPhase(phases, phase)
+appendProgressPhase = function(phases, phase)
     if phase then
         table.insert(phases, phase)
     end
@@ -581,26 +718,100 @@ function Apply.placeOutfitInContainer(playerObj, outfit)
     end
 
     sortPlansWithContainersLast(transferPlan)
-    local targetContainer, targetSource = resolveBestPlacementTarget(playerObj, transferPlan)
-    if not targetContainer then
+
+    if #transferPlan == 0 then
+        return {
+            action = "place",
+            transferred = 0,
+            missing = missing,
+            blocked = {},
+        }
+    end
+
+    local phases, remainingPlans, targetLabel, targetSource = buildPlacementPhases(playerObj, transferPlan)
+    if #phases == 0 then
         return nil, Localization.getText("error_no_container")
     end
 
-    setActionProgress(outfit, {
-        createProgressPhase("container", "ISInventoryTransferAction", "progress_action_moving", transferPlan,
-            targetContainer),
-    })
+    setActionProgress(outfit, phases)
 
-    for _, plan in ipairs(transferPlan) do
-        queueMoveToContainer(playerObj, playerNum, plan.item, targetContainer, plan.sourceContainer)
-        moved = moved + 1
+    for _, phase in ipairs(phases) do
+        local targetContainer = phase.targetContainer
+        for _, plan in ipairs(phase.entries or {}) do
+            queueMoveToContainer(playerObj, playerNum, plan.item, targetContainer, plan.sourceContainer)
+            moved = moved + 1
+        end
+    end
+
+    for _, plan in ipairs(remainingPlans or {}) do
+        summarizeMissing(plan.descriptor or {
+            displayName = plan.displayName,
+            fullType = plan.fullType,
+        }, missing)
     end
 
     return {
         action = "place",
         transferred = moved,
-        targetLabel = Search.getContainerLabel(targetContainer),
+        targetLabel = #phases == 1 and targetLabel or nil,
         targetSource = targetSource,
+        missing = missing,
+        blocked = {},
+    }
+end
+
+function Apply.grabOutfitToInventory(playerObj, outfit)
+    if not playerObj then
+        return nil, Localization.getText("error_no_player")
+    end
+    if not outfit then
+        return nil, Localization.getText("error_select_outfit_first")
+    end
+
+    local externalContainers = Search.getExternalSearchContainers(playerObj)
+    if #externalContainers == 0 then
+        return nil, Localization.getText("error_no_external_container")
+    end
+
+    local playerNum = playerObj:getPlayerNum()
+    local playerInventory = playerObj:getInventory()
+    local reservedItems = {}
+    local transferPlan = {}
+    local moved = 0
+    local missing = {}
+
+    for _, descriptor in ipairs(buildOrderedDescriptors(outfit.items)) do
+        local item = Search.resolveExternalItem(playerObj, descriptor, reservedItems)
+        if item then
+            reservedItems[item] = true
+            table.insert(transferPlan, {
+                item = item,
+                displayName = descriptor.displayName or item:getDisplayName(),
+                fullType = descriptor.fullType,
+                isContainerLike = isContainerLikeItem(item),
+                sourceContainer = item:getContainer(),
+            })
+        else
+            summarizeMissing(descriptor, missing)
+        end
+    end
+
+    sortPlansWithContainersLast(transferPlan)
+
+    setActionProgress(outfit, {
+        createProgressPhase("container", "ISInventoryTransferAction", "progress_action_moving", transferPlan,
+            playerInventory),
+    })
+
+    for _, plan in ipairs(transferPlan) do
+        queueMoveToContainer(playerObj, playerNum, plan.item, playerInventory, plan.sourceContainer)
+        moved = moved + 1
+    end
+
+    return {
+        action = "grab",
+        transferred = moved,
+        targetLabel = Localization.getText("container_inventory"),
         missing = missing,
         blocked = {},
     }

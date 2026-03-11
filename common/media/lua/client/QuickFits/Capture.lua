@@ -8,11 +8,6 @@ QuickFits.Capture = QuickFits.Capture or {}
 local Capture = QuickFits.Capture
 local Data = QuickFits.Data
 
-local IGNORED_BODY_LOCATIONS = {
-    ["transmogde:transmog_location"] = true,
-    ["transmogde:hide_everything_location"] = true,
-}
-
 local function startsWithTransmogPrefix(value)
     local text = string.lower(tostring(value or ""))
     return string.sub(text, 1, 10) == "transmogde" or string.sub(text, 1, 5) == "tmog:"
@@ -30,26 +25,35 @@ local function isMakeupBodyLocation(location)
     return normalized:find("makeup", 1, true) ~= nil
 end
 
-local function isIgnoredWearLocation(location)
-    local normalized = string.lower(bodyLocationToString(location))
-    if normalized == "" then
+local function isIgnoredWearLocation(location, item)
+    return Data.isIgnoredOutfitLocation(bodyLocationToString(location), item)
+end
+
+local function isBandageItem(item)
+    if not item or not item.isCanBandage then
         return false
     end
 
-    if IGNORED_BODY_LOCATIONS[normalized] then
-        return true
+    local ok, canBandage = pcall(function()
+        return item:isCanBandage()
+    end)
+
+    return ok and canBandage == true
+end
+
+local function getItemCategory(item)
+    if not item or not item.getCategory then
+        return ""
     end
 
-    return normalized:find("makeup", 1, true) ~= nil
-        or normalized:find("hair", 1, true) ~= nil
-        or normalized:find("beard", 1, true) ~= nil
-        or normalized:find("stubble", 1, true) ~= nil
-        or normalized:find("moustache", 1, true) ~= nil
-        or normalized:find("mustache", 1, true) ~= nil
-        or normalized:find("eyebrow", 1, true) ~= nil
-        or normalized:find("eyelash", 1, true) ~= nil
-        or normalized:find("bodyhair", 1, true) ~= nil
-        or normalized:find("tattoo", 1, true) ~= nil
+    local ok, category = pcall(function()
+        return item:getCategory()
+    end)
+    if not ok then
+        return ""
+    end
+
+    return string.lower(tostring(category or ""))
 end
 
 local function isMakeupItem(item)
@@ -103,18 +107,51 @@ local function isSupportedWearableItem(item)
         return false
     end
 
+    if isBandageItem(item) or isMakeupItem(item) then
+        return false
+    end
+
+    local category = getItemCategory(item)
+
+    local function canUseEquipLocation(value)
+        local location = string.lower(bodyLocationToString(value))
+        return location ~= ""
+            and location ~= "nil"
+            and location ~= "primary"
+            and location ~= "secondary"
+            and location ~= "bothhands"
+            and location ~= "twohands"
+            and not isIgnoredWearLocation(location, item)
+    end
+
+    if Data.isWatchLikeItem and Data.isWatchLikeItem(item) then
+        local bodyLocation = bodyLocationToString(item.getBodyLocation and item:getBodyLocation() or nil)
+        if canUseEquipLocation(bodyLocation) then
+            return true
+        end
+
+        return item.canBeEquipped and canUseEquipLocation(item:canBeEquipped()) or false
+    end
+
     if (item.IsClothing and item:IsClothing()) or (instanceof and instanceof(item, "Clothing")) then
-        return true
+        if category ~= "clothing" then
+            return false
+        end
+
+        local location = bodyLocationToString(item.getBodyLocation and item:getBodyLocation() or nil)
+        return location ~= "" and location ~= "nil" and not isIgnoredWearLocation(location, item)
     end
 
     if item.IsInventoryContainer and item:IsInventoryContainer() then
-        local canEquip = tostring(item:canBeEquipped() or "")
-        return canEquip ~= "" and canEquip ~= "nil"
+        return canUseEquipLocation(item:canBeEquipped())
     end
 
     if instanceof and instanceof(item, "AlarmClockClothing") then
-        local canEquip = tostring(item:canBeEquipped() or "")
-        return canEquip ~= "" and canEquip ~= "nil"
+        return canUseEquipLocation(item:canBeEquipped())
+    end
+
+    if item.canBeEquipped and category == "clothing" then
+        return canUseEquipLocation(item:canBeEquipped())
     end
 
     return false
@@ -124,7 +161,7 @@ local getItemBodyLocation
 
 local function shouldIgnoreWornItem(wornItem, item)
     local bodyLocation = string.lower(bodyLocationToString(wornItem and wornItem:getLocation() or nil))
-    if isIgnoredWearLocation(bodyLocation) then
+    if isIgnoredWearLocation(bodyLocation, item) then
         return true
     end
 
@@ -133,7 +170,7 @@ local function shouldIgnoreWornItem(wornItem, item)
     end
 
     local sanitizedBodyLocation = getItemBodyLocation(item)
-    if sanitizedBodyLocation == "" or isIgnoredWearLocation(sanitizedBodyLocation) then
+    if sanitizedBodyLocation == "" or isIgnoredWearLocation(sanitizedBodyLocation, item) then
         return true
     end
 
@@ -184,12 +221,17 @@ getItemBodyLocation = function(item)
         return ""
     end
 
-    if isMakeupItem(item) or not isSupportedWearableItem(item) then
+    if isBandageItem(item) or isMakeupItem(item) or not isSupportedWearableItem(item) then
         return ""
     end
 
     local location = ""
-    if (item.IsClothing and item:IsClothing()) then
+    if Data.isWatchLikeItem and Data.isWatchLikeItem(item) then
+        location = tostring(item.getBodyLocation and item:getBodyLocation() or "")
+        if location == "" and item.canBeEquipped then
+            location = tostring(item:canBeEquipped() or "")
+        end
+    elseif (item.IsClothing and item:IsClothing()) then
         location = tostring(item:getBodyLocation() or "")
     elseif (item.IsInventoryContainer and item:IsInventoryContainer()) or
         (instanceof and instanceof(item, "AlarmClockClothing")) or item.canBeEquipped then
@@ -208,7 +250,7 @@ getItemBodyLocation = function(item)
     if location == "nil" then
         return ""
     end
-    if isIgnoredWearLocation(location) then
+    if isIgnoredWearLocation(location, item) then
         return ""
     end
     return location
@@ -219,7 +261,7 @@ function Capture.inventoryItemToDescriptor(item)
         return nil
     end
 
-    if item.IsWeapon and item:IsWeapon() then
+    if isBandageItem(item) or (item.IsWeapon and item:IsWeapon()) then
         return nil
     end
 
@@ -295,7 +337,7 @@ function Capture.captureWornItems(playerObj)
     for index = 0, wornItems:size() - 1 do
         local wornItem = wornItems:get(index)
         local item = wornItem and wornItem:getItem() or nil
-        if item and not shouldIgnoreWornItem(wornItem, item) then
+        if item and isSupportedWearableItem(item) and not shouldIgnoreWornItem(wornItem, item) then
             local bodyLocation = getItemBodyLocation(item)
             if bodyLocation ~= "" then
                 table.insert(items, {

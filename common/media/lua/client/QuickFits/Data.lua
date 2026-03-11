@@ -8,21 +8,135 @@ QuickFits.Data = QuickFits.Data or {}
 local Data = QuickFits.Data
 local Localization = QuickFits.Localization
 
-Data.SCHEMA_VERSION = 4
+Data.SCHEMA_VERSION = 6
 
 local IGNORED_BODY_LOCATIONS = {
     ["transmogde:transmog_location"] = true,
     ["transmogde:hide_everything_location"] = true,
+    ["makeup"] = true,
     ["hair"] = true,
     ["beard"] = true,
     ["stubble"] = true,
     ["moustache"] = true,
     ["mustache"] = true,
+    ["eyebrow"] = true,
+    ["eyelash"] = true,
+    ["bodyhair"] = true,
+    ["tattoo"] = true,
 }
 
 local function startsWithTransmogPrefix(value)
     local text = string.lower(tostring(value or ""))
     return string.sub(text, 1, 10) == "transmogde" or string.sub(text, 1, 5) == "tmog:"
+end
+
+local function normalizeSearchText(value)
+    return string.lower(tostring(value or ""))
+end
+
+local function safeItemCall(item, methodName)
+    if not item or not methodName or type(item[methodName]) ~= "function" then
+        return nil
+    end
+
+    local ok, value = pcall(function()
+        return item[methodName](item)
+    end)
+
+    if ok then
+        return value
+    end
+
+    return nil
+end
+
+local function textHasWatchHint(value)
+    local normalized = normalizeSearchText(value)
+    return normalized ~= "" and normalized:find("watch", 1, true) ~= nil
+end
+
+local function isWatchItem(item, location)
+    if not item then
+        return false
+    end
+
+    if textHasWatchHint(location) then
+        return true
+    end
+
+    return textHasWatchHint(safeItemCall(item, "getFullType"))
+        or textHasWatchHint(safeItemCall(item, "getDisplayName"))
+        or textHasWatchHint(safeItemCall(item, "getType"))
+        or textHasWatchHint(safeItemCall(item, "getBodyLocation"))
+        or textHasWatchHint(safeItemCall(item, "canBeEquipped"))
+end
+
+function Data.isWatchLikeItem(item, location)
+    return isWatchItem(item, location)
+end
+
+function Data.isIgnoredBodyLocation(location)
+    local normalized = normalizeSearchText(location)
+    if normalized == "" then
+        return false
+    end
+
+    if IGNORED_BODY_LOCATIONS[normalized] then
+        return true
+    end
+
+    if string.sub(normalized, 1, 6) == "spncc:" then
+        return true
+    end
+
+    return normalized:find("makeup", 1, true) ~= nil
+        or normalized:find("bandage", 1, true) ~= nil
+        or normalized:find("hair", 1, true) ~= nil
+        or normalized:find("beard", 1, true) ~= nil
+        or normalized:find("stubble", 1, true) ~= nil
+        or normalized:find("moustache", 1, true) ~= nil
+        or normalized:find("mustache", 1, true) ~= nil
+        or normalized:find("eyebrow", 1, true) ~= nil
+        or normalized:find("eyelash", 1, true) ~= nil
+        or normalized:find("bodyhair", 1, true) ~= nil
+        or normalized:find("muscle", 1, true) ~= nil
+        or normalized:find("tattoo", 1, true) ~= nil
+end
+
+function Data.isIgnoredOutfitLocation(location, item)
+    if Data.isIgnoredBodyLocation(location) then
+        return true
+    end
+
+    local isHidden = safeItemCall(item, "isHidden")
+    if isHidden == true and not isWatchItem(item, location) then
+        return true
+    end
+
+    local makeUpType = safeItemCall(item, "getMakeUpType")
+    if makeUpType ~= nil and tostring(makeUpType) ~= "" then
+        return true
+    end
+
+    return false
+end
+
+local function isIgnoredDescriptorText(value)
+    local normalized = normalizeSearchText(value)
+    if normalized == "" then
+        return false
+    end
+
+    return startsWithTransmogPrefix(normalized)
+        or normalized:find("bandage", 1, true) ~= nil
+        or normalized:find("makeup", 1, true) ~= nil
+        or normalized:find("lipstick", 1, true) ~= nil
+        or normalized:find("body hair", 1, true) ~= nil
+        or normalized:find("bodyhair", 1, true) ~= nil
+        or normalized:find("tattoo", 1, true) ~= nil
+        or normalized == "abs"
+        or normalized:find(":abs", 1, true) ~= nil
+        or normalized:find(".abs", 1, true) ~= nil
 end
 
 local function nowMs()
@@ -59,33 +173,23 @@ local function sanitizeName(name)
 end
 
 function Data.isIgnoredDescriptor(item)
-    local bodyLocation = string.lower(tostring(item and item.bodyLocation or ""))
-    if IGNORED_BODY_LOCATIONS[bodyLocation] then
-        return true
-    end
-
-    if bodyLocation:find("hair", 1, true) ~= nil
-        or bodyLocation:find("beard", 1, true) ~= nil
-        or bodyLocation:find("stubble", 1, true) ~= nil
-        or bodyLocation:find("moustache", 1, true) ~= nil
-        or bodyLocation:find("mustache", 1, true) ~= nil
-        or bodyLocation:find("eyebrow", 1, true) ~= nil
-        or bodyLocation:find("eyelash", 1, true) ~= nil then
+    local bodyLocation = item and item.bodyLocation or ""
+    if Data.isIgnoredOutfitLocation(bodyLocation, nil) then
         return true
     end
 
     local displayName = tostring(item and item.displayName or "")
-    if startsWithTransmogPrefix(displayName) then
+    if isIgnoredDescriptorText(displayName) then
         return true
     end
 
     local fullType = tostring(item and item.fullType or "")
-    if startsWithTransmogPrefix(fullType) then
+    if isIgnoredDescriptorText(fullType) then
         return true
     end
 
     local itemType = tostring(item and item.itemType or "")
-    if startsWithTransmogPrefix(itemType) then
+    if isIgnoredDescriptorText(itemType) then
         return true
     end
 

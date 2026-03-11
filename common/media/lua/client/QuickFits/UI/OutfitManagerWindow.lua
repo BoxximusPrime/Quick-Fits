@@ -341,6 +341,8 @@ local function summarizeResult(outfit, result)
         actionText = tr("result_action_wear")
     elseif result.action == "place" then
         actionText = tr("result_action_place")
+    elseif result.action == "grab" then
+        actionText = tr("result_action_grab")
     end
     table.insert(parts, tr("result_outfit_action", outfit.name or tr("fallback_outfit_name"), actionText))
 
@@ -520,6 +522,14 @@ function OutfitManagerWindow:createChildren()
     self.placeButton.backgroundColor = { r = 0.08, g = 0.12, b = 0.2, a = 0.95 }
     self:addChild(self.placeButton)
 
+    self.grabButton = ISButton:new(leftPaneX + 498, self.height - 94, 110, 30, "", self,
+        self.onGrabAll)
+    self.grabButton:initialise()
+    self.grabButton:instantiate()
+    self.grabButton.borderColor = { r = 0.28, g = 0.48, b = 0.72, a = 0.9 }
+    self.grabButton.backgroundColor = { r = 0.08, g = 0.16, b = 0.26, a = 0.95 }
+    self:addChild(self.grabButton)
+
     self.deleteButton = ISButton:new(rightPaneX + 360 + 90, headerY + 32, 90, 30, "", self,
         self.onDelete)
     self.deleteButton:initialise()
@@ -614,8 +624,9 @@ function OutfitManagerWindow:layoutLocalizedControls()
         { button = self.addButton,    width = measureButtonWidth(tr("button_add"), 90, 28) },
         { button = self.removeButton, width = measureButtonWidth(tr("button_take_off"), 100, 28) },
         { button = self.placeButton,  width = measureButtonWidth(tr("button_place_container"), 160, 32) },
+        { button = self.grabButton,   width = measureButtonWidth(tr("button_grab_all"), 110, 32) },
     }
-    local preferredGaps = { 6, 14, 6 }
+    local preferredGaps = { 6, 14, 6, 8 }
     local preferredWidth = 0
     for index, spec in ipairs(actionButtons) do
         preferredWidth = preferredWidth + spec.width + (preferredGaps[index] or 0)
@@ -730,6 +741,7 @@ function OutfitManagerWindow:applyLocalizedText()
     setButtonLabel(self.addButton, tr("button_add"))
     setButtonLabel(self.removeButton, tr("button_take_off"))
     setButtonLabel(self.placeButton, tr("button_place_container"))
+    setButtonLabel(self.grabButton, tr("button_grab_all"))
     setButtonLabel(self.deleteButton, tr("button_delete"))
     setButtonLabel(self.stopProgressButton, tr("button_stop"))
 
@@ -737,6 +749,7 @@ function OutfitManagerWindow:applyLocalizedText()
     self.addButton.tooltip = tr("tooltip_add")
     self.removeButton.tooltip = tr("tooltip_take_off")
     self.placeButton.tooltip = tr("tooltip_place_container")
+    self.grabButton.tooltip = tr("tooltip_grab_all")
 
     self:layoutLocalizedControls()
 end
@@ -1167,7 +1180,12 @@ function OutfitManagerWindow:getQueueBackedProgressCount(phase)
         completed = math.max(completed, math.max((phase.total or #phase.entries) - remaining, 0))
     end
 
-    return math.min(completed, phase.total or #phase.entries), queuedEntry
+    local total = phase.total or #phase.entries
+    if not queuedEntry and completed < total then
+        queuedEntry = phase.entries[completed + 1]
+    end
+
+    return math.min(completed, total), queuedEntry
 end
 
 function OutfitManagerWindow:beginWearProgress(progress)
@@ -1292,6 +1310,7 @@ function OutfitManagerWindow:drawWearProgressBar()
     end
 
     local isInterrupted = self.activeProgress.state == "interrupted"
+    local isCompleted = self.activeProgress.state == "completed"
     local completed = math.min(self.activeProgress.completed or 0, self.activeProgress.total or 0)
     local total = math.max(self.activeProgress.total or 0, 1)
     local fillW = math.floor((barW - 2) * (completed / total))
@@ -1313,6 +1332,8 @@ function OutfitManagerWindow:drawWearProgressBar()
     local label = ""
     if isInterrupted then
         label = tr("progress_interrupted_phase", actionText, completed, total)
+    elseif isCompleted then
+        label = tr("progress_completed_phase", actionText, completed, total)
     elseif currentEntryName ~= "" then
         label = tr("progress_status_with_item", actionText, currentEntryName, completed, total)
     else
@@ -1848,6 +1869,25 @@ function OutfitManagerWindow:onPlaceInContainer()
     end
 
     local result, err = Apply.placeOutfitInContainer(self.playerObj, selected)
+    if not result then
+        self:setStatus(err, true)
+        return
+    end
+
+    self:beginWearProgress(Apply.consumeLastWearProgress())
+
+    local summary, isError = summarizeResult(selected, result)
+    self:setStatus(summary, isError)
+end
+
+function OutfitManagerWindow:onGrabAll()
+    local selected = self:getSelectedOutfit()
+    if not selected then
+        self:setStatus(tr("status_select_before_grab"), true)
+        return
+    end
+
+    local result, err = Apply.grabOutfitToInventory(self.playerObj, selected)
     if not result then
         self:setStatus(err, true)
         return
