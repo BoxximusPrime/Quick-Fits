@@ -179,6 +179,123 @@ local function addPlacementCandidate(candidates, seen, container, source)
     })
 end
 
+local function tryGetSquare(target)
+    if not target then
+        return nil
+    end
+
+    local okSquare, square = pcall(function()
+        return target:getSquare()
+    end)
+    if okSquare and square then
+        return square
+    end
+
+    return nil
+end
+
+local function getContainerAnchorSquare(container)
+    if not container then
+        return nil
+    end
+
+    local okSourceGrid, sourceGrid = pcall(function()
+        return container:getSourceGrid()
+    end)
+    if okSourceGrid and sourceGrid then
+        return sourceGrid
+    end
+
+    local okParent, parent = pcall(function()
+        return container:getParent()
+    end)
+    if okParent and parent then
+        local parentSquare = tryGetSquare(parent)
+        if parentSquare then
+            return parentSquare
+        end
+    end
+
+    local okContainingItem, containingItem = pcall(function()
+        return container:getContainingItem()
+    end)
+    if not okContainingItem or not containingItem then
+        return nil
+    end
+
+    local itemSquare = tryGetSquare(containingItem)
+    if itemSquare then
+        return itemSquare
+    end
+
+    local okWorldItem, worldItem = pcall(function()
+        return containingItem:getWorldItem()
+    end)
+    if okWorldItem and worldItem then
+        local worldItemSquare = tryGetSquare(worldItem)
+        if worldItemSquare then
+            return worldItemSquare
+        end
+    end
+
+    local okItemContainer, itemContainer = pcall(function()
+        return containingItem:getContainer()
+    end)
+    if okItemContainer and itemContainer and itemContainer ~= container then
+        return getContainerAnchorSquare(itemContainer)
+    end
+
+    return nil
+end
+
+local function getContainerDistanceFromPlayer(playerObj, container)
+    if not playerObj or not container then
+        return math.huge
+    end
+
+    local playerSquare = playerObj:getCurrentSquare()
+    local containerSquare = getContainerAnchorSquare(container)
+    if not playerSquare or not containerSquare then
+        return math.huge
+    end
+
+    local okDistance, distance = pcall(function()
+        return playerSquare:DistToProper(containerSquare)
+    end)
+    if okDistance and distance ~= nil then
+        return distance
+    end
+
+    local dx = math.abs(playerSquare:getX() - containerSquare:getX())
+    local dy = math.abs(playerSquare:getY() - containerSquare:getY())
+    local dz = math.abs(playerSquare:getZ() - containerSquare:getZ())
+    return dx + dy + dz
+end
+
+local function sortPlacementCandidates(playerObj, candidates)
+    table.sort(candidates, function(left, right)
+        local leftSelected = left.source == "selected"
+        local rightSelected = right.source == "selected"
+        if leftSelected ~= rightSelected then
+            return leftSelected
+        end
+
+        local leftFloor = isFloorContainer(left.container)
+        local rightFloor = isFloorContainer(right.container)
+        if leftFloor ~= rightFloor then
+            return not leftFloor
+        end
+
+        local leftDistance = getContainerDistanceFromPlayer(playerObj, left.container)
+        local rightDistance = getContainerDistanceFromPlayer(playerObj, right.container)
+        if leftDistance ~= rightDistance then
+            return leftDistance < rightDistance
+        end
+
+        return tostring(left.source or "") < tostring(right.source or "")
+    end)
+end
+
 local function addContainersFromObject(containers, seen, object)
     local okSingle, singleContainer = pcall(function()
         return object:getContainer()
@@ -350,23 +467,8 @@ function Search.getReachableLootContainers(playerObj)
 end
 
 function Search.resolvePlacementContainer(playerObj)
-    local selectedContainer = Search.getSelectedLootContainer(playerObj)
-    if selectedContainer then
-        return selectedContainer, "selected"
-    end
-
-    for _, container in ipairs(Search.getReachableLootContainers(playerObj)) do
-        return container, "loot-window"
-    end
-
-    for _, container in ipairs(Search.getNearbyContainers(playerObj, 2)) do
-        if not isFloorContainer(container) then
-            return container, "nearby"
-        end
-    end
-
-    for _, container in ipairs(Search.getNearbyItemContainers(playerObj, 2)) do
-        return container, "ground-item"
+    for _, candidate in ipairs(Search.getPlacementCandidates(playerObj)) do
+        return candidate.container, candidate.source
     end
 
     return nil, nil
@@ -385,10 +487,9 @@ function Search.getPlacementCandidates(playerObj)
         addPlacementCandidate(candidates, seen, container, "loot-window")
     end
 
-    local floorCandidates = {}
     for _, container in ipairs(Search.getNearbyContainers(playerObj, 2)) do
         if isFloorContainer(container) then
-            addPlacementCandidate(floorCandidates, seen, container, "floor")
+            addPlacementCandidate(candidates, seen, container, "floor")
         else
             addPlacementCandidate(candidates, seen, container, "nearby")
         end
@@ -398,9 +499,7 @@ function Search.getPlacementCandidates(playerObj)
         addPlacementCandidate(candidates, seen, container, "ground-item")
     end
 
-    for _, candidate in ipairs(floorCandidates) do
-        table.insert(candidates, candidate)
-    end
+    sortPlacementCandidates(playerObj, candidates)
 
     return candidates
 end

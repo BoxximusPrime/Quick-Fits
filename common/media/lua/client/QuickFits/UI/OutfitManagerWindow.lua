@@ -500,21 +500,21 @@ function OutfitManagerWindow:createChildren()
     self.wearButton.backgroundColor = { r = 0.08, g = 0.2, b = 0.08, a = 0.95 }
     self:addChild(self.wearButton)
 
-    self.addButton = ISButton:new(leftPaneX + 100, self.height - 94, 90, 30, "", self, self.onAdd)
+    self.addButton = ISButton:new(self.wearButton:getRight() + 10, self.height - 94, 90, 30, "", self, self.onAdd)
     self.addButton:initialise()
     self.addButton:instantiate()
     self.addButton.borderColor = { r = 0.3, g = 0.5, b = 0.68, a = 0.9 }
     self.addButton.backgroundColor = { r = 0.08, g = 0.13, b = 0.22, a = 0.95 }
     self:addChild(self.addButton)
 
-    self.removeButton = ISButton:new(leftPaneX + 218, self.height - 94, 100, 30, "", self, self.onRemove)
+    self.removeButton = ISButton:new(self.addButton:getRight() + 18, self.height - 94, 100, 30, "", self, self.onRemove)
     self.removeButton:initialise()
     self.removeButton:instantiate()
     self.removeButton.borderColor = { r = 0.7, g = 0.5, b = 0.22, a = 0.9 }
     self.removeButton.backgroundColor = { r = 0.2, g = 0.12, b = 0.04, a = 0.95 }
     self:addChild(self.removeButton)
 
-    self.placeButton = ISButton:new(leftPaneX + 328, self.height - 94, 160, 30, "", self,
+    self.placeButton = ISButton:new(self.removeButton:getRight() + 10, self.height - 94, 160, 30, "", self,
         self.onPlaceInContainer)
     self.placeButton:initialise()
     self.placeButton:instantiate()
@@ -522,7 +522,7 @@ function OutfitManagerWindow:createChildren()
     self.placeButton.backgroundColor = { r = 0.08, g = 0.12, b = 0.2, a = 0.95 }
     self:addChild(self.placeButton)
 
-    self.grabButton = ISButton:new(leftPaneX + 498, self.height - 94, 110, 30, "", self,
+    self.grabButton = ISButton:new(self.placeButton:getRight() + 10, self.height - 94, 110, 30, "", self,
         self.onGrabAll)
     self.grabButton:initialise()
     self.grabButton:instantiate()
