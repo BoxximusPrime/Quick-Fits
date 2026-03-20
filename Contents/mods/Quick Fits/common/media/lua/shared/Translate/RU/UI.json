@@ -88,5 +88,9 @@
     "UI_QuickFits_default_outfit_name": "Komplekt %1",
     "UI_QuickFits_container_generic": "konteiner",
     "UI_QuickFits_container_inventory": "inventar",
-    "UI_QuickFits_container_nearby": "blizhaishii konteiner"
+    "UI_QuickFits_container_nearby": "blizhaishii konteiner",
+    "UI_QuickFits_context_item_wear": "Nadet",
+    "UI_QuickFits_context_item_take_off": "Snyat",
+    "UI_QuickFits_context_item_grab": "Zabrat poblizosti",
+    "UI_QuickFits_context_item_place": "Polozhit v blizhnii konteiner"
 }

@@ -88,5 +88,9 @@
     "UI_QuickFits_default_outfit_name": "TaoZhuang %1",
     "UI_QuickFits_container_generic": "rongqi",
     "UI_QuickFits_container_inventory": "beibao",
-    "UI_QuickFits_container_nearby": "fujin rongqi"
+    "UI_QuickFits_container_nearby": "fujin rongqi",
+    "UI_QuickFits_context_item_wear": "ChuanShang",
+    "UI_QuickFits_context_item_take_off": "TuoXia",
+    "UI_QuickFits_context_item_grab": "Cong fujin naqu",
+    "UI_QuickFits_context_item_place": "Fang dao fujin rongqi"
 }

@@ -88,5 +88,9 @@
     "UI_QuickFits_default_outfit_name": "Atuendo %1",
     "UI_QuickFits_container_generic": "contenedor",
     "UI_QuickFits_container_inventory": "inventario",
-    "UI_QuickFits_container_nearby": "contenedor cercano"
+    "UI_QuickFits_container_nearby": "contenedor cercano",
+    "UI_QuickFits_context_item_wear": "Ponerse",
+    "UI_QuickFits_context_item_take_off": "Quitar",
+    "UI_QuickFits_context_item_grab": "Recoger de cerca",
+    "UI_QuickFits_context_item_place": "Poner en contenedor cercano"
 }

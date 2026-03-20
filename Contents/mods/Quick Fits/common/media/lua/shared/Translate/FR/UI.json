@@ -88,5 +88,9 @@
     "UI_QuickFits_default_outfit_name": "Tenue %1",
     "UI_QuickFits_container_generic": "conteneur",
     "UI_QuickFits_container_inventory": "inventaire",
-    "UI_QuickFits_container_nearby": "conteneur proche"
+    "UI_QuickFits_container_nearby": "conteneur proche",
+    "UI_QuickFits_context_item_wear": "Porter",
+    "UI_QuickFits_context_item_take_off": "Retirer",
+    "UI_QuickFits_context_item_grab": "Prendre a proximite",
+    "UI_QuickFits_context_item_place": "Placer dans le conteneur proche"
 }

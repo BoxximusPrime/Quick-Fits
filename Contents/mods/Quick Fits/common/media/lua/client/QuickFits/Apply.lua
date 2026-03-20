@@ -17,6 +17,7 @@ local Search = QuickFits.Search
 local Capture = QuickFits.Capture
 
 Apply.lastWearProgress = nil
+Apply.pendingSequences = Apply.pendingSequences or {}
 
 local function isContainerLikeItem(item)
     return item and instanceof and instanceof(item, "InventoryContainer") or false
@@ -49,18 +50,6 @@ local function buildOrderedDescriptors(items)
     for _, descriptor in ipairs(items or {}) do
         table.insert(ordered, descriptor)
     end
-
-    table.sort(ordered, function(left, right)
-        local leftIsContainer = isContainerLikeDescriptor(left)
-        local rightIsContainer = isContainerLikeDescriptor(right)
-        if leftIsContainer ~= rightIsContainer then
-            return not leftIsContainer
-        end
-
-        local leftName = string.lower(tostring(left.displayName or left.fullType or ""))
-        local rightName = string.lower(tostring(right.displayName or right.fullType or ""))
-        return leftName < rightName
-    end)
 
     return ordered
 end
@@ -134,6 +123,10 @@ local function queueUnequip(playerObj, item)
     ISTimedActionQueue.add(ISUnequipAction:new(playerObj, item, 50))
 end
 
+local function queueWearAction(playerObj, item)
+    ISTimedActionQueue.add(ISWearClothing:new(playerObj, item, 50))
+end
+
 local function getTimedActionQueue(playerObj)
     if not playerObj or not ISTimedActionQueue or type(ISTimedActionQueue.getTimedActionQueue) ~= "function" then
         return nil
@@ -147,6 +140,45 @@ local function getTimedActionQueue(playerObj)
     end
 
     return nil
+end
+
+local function hasQueuedTimedActions(playerObj)
+    local queue = getTimedActionQueue(playerObj)
+    if not queue then
+        return false
+    end
+
+    if queue.current then
+        return true
+    end
+
+    return queue.queue and #queue.queue > 0 or false
+end
+
+local function getPendingSequence(playerObj)
+    if not playerObj then
+        return nil
+    end
+
+    return Apply.pendingSequences[playerObj:getPlayerNum()]
+end
+
+local function clearPendingSequence(playerObj)
+    if not playerObj then
+        return
+    end
+
+    Apply.pendingSequences[playerObj:getPlayerNum()] = nil
+end
+
+local function startPendingSequence(playerObj, state)
+    if not playerObj or not state then
+        return
+    end
+
+    state.playerObj = playerObj
+    state.playerNum = playerObj:getPlayerNum()
+    Apply.pendingSequences[state.playerNum] = state
 end
 
 local function itemNeedsUnequip(playerObj, item)
@@ -199,20 +231,62 @@ local function itemNeedsUnequip(playerObj, item)
     return false
 end
 
+local function cloneDescriptor(descriptor)
+    if not descriptor then
+        return nil
+    end
+
+    return {
+        fullType = descriptor.fullType,
+        displayName = descriptor.displayName,
+        bodyLocation = descriptor.bodyLocation,
+        itemType = descriptor.itemType,
+        included = descriptor.included ~= false,
+    }
+end
+
+local function buildTemporaryOutfitForDescriptor(descriptor)
+    local cloned = cloneDescriptor(descriptor)
+    if not cloned then
+        return nil
+    end
+
+    local name = tostring(cloned.displayName or "")
+    if name == "" then
+        name = tostring(cloned.fullType or Localization.getText("fallback_outfit_name"))
+    end
+
+    return {
+        id = string.format("descriptor:%s|%s", tostring(cloned.fullType or ""), tostring(cloned.bodyLocation or "")),
+        name = name,
+        items = { cloned },
+    }
+end
+
+local function descriptorMatchesWornEntry(descriptor, entry)
+    if not descriptor or not entry then
+        return false
+    end
+
+    if tostring(descriptor.fullType or "") ~= tostring(entry.fullType or "") then
+        return false
+    end
+
+    local descriptorLocation = tostring(descriptor.bodyLocation or "")
+    if descriptorLocation ~= "" then
+        return descriptorLocation == tostring(entry.bodyLocation or "")
+    end
+
+    return true
+end
+
 local function queueMoveToContainer(playerObj, playerNum, item, targetContainer, sourceContainer)
     sourceContainer = sourceContainer or item:getContainer()
     if not sourceContainer or sourceContainer == targetContainer then
         return
     end
 
-    local walkContainer = targetContainer
-    if targetContainer == playerObj:getInventory() then
-        walkContainer = sourceContainer
-    end
-
-    if walkContainer and walkContainer ~= playerObj:getInventory() then
-        luautils.walkToContainer(walkContainer, playerNum)
-    end
+    luautils.walkToContainer(targetContainer, playerNum)
     ISTimedActionQueue.add(ISInventoryTransferUtil.newInventoryTransferAction(playerObj, item, sourceContainer,
         targetContainer))
 end
@@ -426,6 +500,24 @@ local function summarizeMissing(descriptor, list)
     table.insert(list, descriptor.displayName or descriptor.fullType)
 end
 
+local function buildWearSequenceEntries(descriptors, wornByType)
+    local entries = {}
+
+    for _, descriptor in ipairs(buildOrderedDescriptors(descriptors)) do
+        if descriptor and not wornByType[descriptor.fullType] then
+            table.insert(entries, {
+                item = nil,
+                descriptor = descriptor,
+                displayName = descriptor.displayName or descriptor.fullType,
+                fullType = descriptor.fullType,
+                isContainerLike = isContainerLikeDescriptor(descriptor),
+            })
+        end
+    end
+
+    return entries
+end
+
 local function buildWearPlans(playerObj, outfit, wornByType, wornByLocation)
     local reservedItems = {}
     local equipPlans = {}
@@ -456,7 +548,6 @@ local function buildWearPlans(playerObj, outfit, wornByType, wornByLocation)
         end
     end
 
-    sortPlansWithContainersLast(equipPlans)
     return equipPlans, missing, blocked
 end
 
@@ -524,16 +615,11 @@ function Apply.consumeLastWearProgress()
 end
 
 function Apply.isTimedActionQueueActive(playerObj)
-    local queue = getTimedActionQueue(playerObj)
-    if not queue then
-        return false
-    end
-
-    if queue.current then
+    if hasQueuedTimedActions(playerObj) then
         return true
     end
 
-    return queue.queue and #queue.queue > 0 or false
+    return getPendingSequence(playerObj) ~= nil
 end
 
 function Apply.getTimedActionQueueSnapshot(playerObj)
@@ -554,6 +640,8 @@ function Apply.getTimedActionQueueSnapshot(playerObj)
 end
 
 function Apply.stopTimedActionQueue(playerObj)
+    clearPendingSequence(playerObj)
+
     if not playerObj or not ISTimedActionQueue or type(ISTimedActionQueue.clear) ~= "function" then
         return false
     end
@@ -563,6 +651,109 @@ function Apply.stopTimedActionQueue(playerObj)
     end)
 
     return ok
+end
+
+local function queueNextWearSequenceStep(state)
+    local playerObj = state and state.playerObj or nil
+    if not playerObj then
+        return false
+    end
+
+    if state.awaitingWearEntry then
+        local entry = state.awaitingWearEntry
+        local descriptor = entry and entry.descriptor or nil
+        local item = descriptor and Search.findPlayerOwnedItem(playerObj, descriptor, {}) or nil
+        if item and Capture.isSupportedWearableItem(item) then
+            entry.item = item
+            state.awaitingWearEntry = nil
+            queueWearAction(playerObj, item)
+            return true
+        end
+
+        state.awaitingWearEntry = nil
+    end
+
+    local _, wornByType, wornByLocation = getWornState(playerObj)
+
+    for _, entry in ipairs(state.entries or {}) do
+        local descriptor = entry and entry.descriptor or nil
+        if descriptor and not wornByType[descriptor.fullType] then
+            local blocker = descriptor.bodyLocation ~= "" and wornByLocation[descriptor.bodyLocation] or nil
+            if blocker and blocker.fullType ~= descriptor.fullType then
+                queueUnequip(playerObj, blocker.item)
+                return true
+            end
+
+            local item = Search.resolveItem(playerObj, descriptor, {})
+            if item and Capture.isSupportedWearableItem(item) then
+                entry.item = item
+                if item:getContainer() == playerObj:getInventory() then
+                    queueWearAction(playerObj, item)
+                else
+                    state.awaitingWearEntry = entry
+                    queueTransferIfNeeded(playerObj, state.playerNum, item)
+                end
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+local function queueNextGrabSequenceStep(state)
+    local playerObj = state and state.playerObj or nil
+    if not playerObj then
+        return false
+    end
+
+    local reservedItems = {}
+
+    for _, entry in ipairs(state.entries or {}) do
+        local descriptor = entry and entry.descriptor or nil
+        if descriptor then
+            local inventoryItem = Search.findPlayerOwnedItem(playerObj, descriptor, reservedItems)
+            if inventoryItem then
+                entry.item = inventoryItem
+                reservedItems[inventoryItem] = true
+            else
+                local item = Search.resolveExternalItem(playerObj, descriptor, reservedItems)
+                if item then
+                    entry.item = item
+                    reservedItems[item] = true
+                    queueTransferIfNeeded(playerObj, state.playerNum, item)
+                    return true
+                end
+            end
+        end
+    end
+
+    return false
+end
+
+function Apply.processPendingSequence(playerObj)
+    local state = getPendingSequence(playerObj)
+    if not state then
+        return false
+    end
+
+    if hasQueuedTimedActions(playerObj) then
+        return true
+    end
+
+    local advanced = false
+    if state.kind == "wear" then
+        advanced = queueNextWearSequenceStep(state)
+    elseif state.kind == "grab" then
+        advanced = queueNextGrabSequenceStep(state)
+    end
+
+    if advanced then
+        return true
+    end
+
+    clearPendingSequence(playerObj)
+    return false
 end
 
 function Apply.isOutfitFullyWorn(playerObj, outfit)
@@ -599,22 +790,26 @@ function Apply.applyReplacement(playerObj, outfit)
         end
     end
 
-    local equipPlans, missing = buildWearPlans(playerObj, outfit, wornByType)
+    local equipPlans = buildWearSequenceEntries(outfit.items or {}, wornByType)
     local phases = {}
     appendProgressPhase(phases,
         createProgressPhase("inventory", "ISUnequipAction", "progress_action_removing", removeEntries))
     appendProgressPhase(phases, createProgressPhase("wear", "ISWearClothing", "progress_action_wearing", equipPlans))
     setActionProgress(outfit, phases)
-    for _, plan in ipairs(equipPlans) do
-        queueWear(playerObj, playerNum, plan.item)
-        equippedCount = equippedCount + 1
-    end
+
+    startPendingSequence(playerObj, {
+        kind = "wear",
+        entries = equipPlans,
+    })
+    Apply.processPendingSequence(playerObj)
+
+    equippedCount = #equipPlans
 
     return {
         action = "wear",
         removed = removedCount,
         equipped = equippedCount,
-        missing = missing,
+        missing = {},
         blocked = {},
     }
 end
@@ -625,9 +820,7 @@ function Apply.applyAdditive(playerObj, outfit)
     local equippedCount = 0
     local removedCount = 0
 
-    local reservedItems = {}
     local equipPlans = {}
-    local missing = {}
     local removedItems = {}
     local removeEntries = {}
 
@@ -648,39 +841,30 @@ function Apply.applyAdditive(playerObj, outfit)
                     wornByLocation[blocker.bodyLocation] = nil
                 end
             end
-
-            local item = Search.resolveItem(playerObj, descriptor, reservedItems)
-            if item and Capture.isSupportedWearableItem(item) then
-                reservedItems[item] = true
-                table.insert(equipPlans, {
-                    item = item,
-                    descriptor = descriptor,
-                    displayName = descriptor.displayName or item:getDisplayName(),
-                    fullType = descriptor.fullType,
-                    isContainerLike = isContainerLikeItem(item),
-                })
-            else
-                summarizeMissing(descriptor, missing)
-            end
         end
     end
 
-    sortPlansWithContainersLast(equipPlans)
+    equipPlans = buildWearSequenceEntries(outfit.items or {}, wornByType)
+
     local phases = {}
     appendProgressPhase(phases,
         createProgressPhase("inventory", "ISUnequipAction", "progress_action_removing", removeEntries))
     appendProgressPhase(phases, createProgressPhase("wear", "ISWearClothing", "progress_action_wearing", equipPlans))
     setActionProgress(outfit, phases)
-    for _, plan in ipairs(equipPlans) do
-        queueWear(playerObj, playerNum, plan.item)
-        equippedCount = equippedCount + 1
-    end
+
+    startPendingSequence(playerObj, {
+        kind = "wear",
+        entries = equipPlans,
+    })
+    Apply.processPendingSequence(playerObj)
+
+    equippedCount = #equipPlans
 
     return {
         action = "add",
         removed = removedCount,
         equipped = equippedCount,
-        missing = missing,
+        missing = {},
         blocked = {},
     }
 end
@@ -786,6 +970,7 @@ function Apply.grabOutfitToInventory(playerObj, outfit)
             reservedItems[item] = true
             table.insert(transferPlan, {
                 item = item,
+                descriptor = descriptor,
                 displayName = descriptor.displayName or item:getDisplayName(),
                 fullType = descriptor.fullType,
                 isContainerLike = isContainerLikeItem(item),
@@ -803,10 +988,13 @@ function Apply.grabOutfitToInventory(playerObj, outfit)
             playerInventory),
     })
 
-    for _, plan in ipairs(transferPlan) do
-        queueMoveToContainer(playerObj, playerNum, plan.item, playerInventory, plan.sourceContainer)
-        moved = moved + 1
-    end
+    startPendingSequence(playerObj, {
+        kind = "grab",
+        entries = transferPlan,
+    })
+    Apply.processPendingSequence(playerObj)
+
+    moved = #transferPlan
 
     return {
         action = "grab",
@@ -855,6 +1043,70 @@ function Apply.removeOutfitToInventory(playerObj, outfit)
     }
 end
 
+function Apply.addItem(playerObj, descriptor)
+    local outfit = buildTemporaryOutfitForDescriptor(descriptor)
+    if not outfit then
+        return nil, Localization.getText("error_select_outfit_first")
+    end
+
+    return Apply.addOutfit(playerObj, outfit)
+end
+
+function Apply.placeItemInContainer(playerObj, descriptor)
+    local outfit = buildTemporaryOutfitForDescriptor(descriptor)
+    if not outfit then
+        return nil, Localization.getText("error_select_outfit_first")
+    end
+
+    return Apply.placeOutfitInContainer(playerObj, outfit)
+end
+
+function Apply.grabItemToInventory(playerObj, descriptor)
+    local outfit = buildTemporaryOutfitForDescriptor(descriptor)
+    if not outfit then
+        return nil, Localization.getText("error_select_outfit_first")
+    end
+
+    return Apply.grabOutfitToInventory(playerObj, outfit)
+end
+
+function Apply.removeItemToInventory(playerObj, descriptor)
+    if not playerObj then
+        return nil, Localization.getText("error_no_player")
+    end
+    if not descriptor then
+        return nil, Localization.getText("error_select_outfit_first")
+    end
+
+    local wornEntries = getWornState(playerObj)
+    local removeEntries = {}
+
+    for _, entry in ipairs(wornEntries) do
+        if descriptorMatchesWornEntry(descriptor, entry) then
+            table.insert(removeEntries, {
+                item = entry.item,
+                displayName = entry.displayName,
+                fullType = entry.fullType,
+            })
+            queueUnequip(playerObj, entry.item)
+            break
+        end
+    end
+
+    local outfit = buildTemporaryOutfitForDescriptor(descriptor)
+    setActionProgress(outfit, {
+        createProgressPhase("inventory", "ISUnequipAction", "progress_action_removing", removeEntries),
+    })
+
+    return {
+        action = "remove",
+        removed = #removeEntries,
+        equipped = 0,
+        missing = {},
+        blocked = {},
+    }
+end
+
 function Apply.wearOutfit(playerObj, outfit)
     if not playerObj then
         return nil, Localization.getText("error_no_player")
@@ -879,4 +1131,12 @@ end
 
 function Apply.applyOutfit(playerObj, outfit)
     return Apply.wearOutfit(playerObj, outfit)
+end
+
+if not QuickFits.Apply._sequenceEventsRegistered then
+    QuickFits.Apply._sequenceEventsRegistered = true
+
+    Events.OnPlayerUpdate.Add(function(playerObj)
+        Apply.processPendingSequence(playerObj)
+    end)
 end

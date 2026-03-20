@@ -88,5 +88,9 @@
     "UI_QuickFits_default_outfit_name": "Outfit %1",
     "UI_QuickFits_container_generic": "Behaelter",
     "UI_QuickFits_container_inventory": "Inventar",
-    "UI_QuickFits_container_nearby": "naher Behaelter"
+    "UI_QuickFits_container_nearby": "naher Behaelter",
+    "UI_QuickFits_context_item_wear": "Anziehen",
+    "UI_QuickFits_context_item_take_off": "Ausziehen",
+    "UI_QuickFits_context_item_grab": "Aus der Naehe holen",
+    "UI_QuickFits_context_item_place": "In nahen Behaelter legen"
 }

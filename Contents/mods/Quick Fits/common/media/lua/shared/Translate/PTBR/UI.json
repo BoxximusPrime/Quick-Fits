@@ -88,5 +88,9 @@
     "UI_QuickFits_default_outfit_name": "Traje %1",
     "UI_QuickFits_container_generic": "contenedor",
     "UI_QuickFits_container_inventory": "inventario",
-    "UI_QuickFits_container_nearby": "contenedor proximo"
+    "UI_QuickFits_container_nearby": "contenedor proximo",
+    "UI_QuickFits_context_item_wear": "Vestir",
+    "UI_QuickFits_context_item_take_off": "Tirar",
+    "UI_QuickFits_context_item_grab": "Pegar dos proximos",
+    "UI_QuickFits_context_item_place": "Colocar no contenedor proximo"
 }

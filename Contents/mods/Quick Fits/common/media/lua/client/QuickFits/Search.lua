@@ -1,11 +1,13 @@
 ---@diagnostic disable: undefined-global
 
 require "QuickFits/Localization"
+require "QuickFits/Capture"
 
 QuickFits = QuickFits or {}
 QuickFits.Search = QuickFits.Search or {}
 
 local Search = QuickFits.Search
+local Capture = QuickFits.Capture
 local Localization = QuickFits.Localization
 
 local isFloorContainer
@@ -558,6 +560,46 @@ function Search.getContainerLabel(container)
         return Localization.getText("container_nearby")
     end
     return containerType
+end
+
+function Search.getReachableDescriptorLookups(playerObj, descriptors)
+    local exactLookup = {}
+    local typeLookup = {}
+    local reservedItems = {}
+    local playerInventory = playerObj and playerObj:getInventory() or nil
+    local externalContainers = Search.getExternalSearchContainers(playerObj)
+
+    for _, wornDescriptor in ipairs(Capture.captureWornItems(playerObj) or {}) do
+        if wornDescriptor and wornDescriptor.item then
+            reservedItems[wornDescriptor.item] = true
+        end
+    end
+
+    for _, descriptor in ipairs(descriptors or {}) do
+        local item = nil
+        if playerInventory then
+            item = Search.findItemByDescriptor(playerInventory, descriptor, reservedItems)
+        end
+
+        if not item then
+            item = Search.findBestItemInContainers(externalContainers, descriptor, reservedItems)
+        end
+
+        if item then
+            reservedItems[item] = true
+
+            local exactKey = string.format("%s|%s", tostring(descriptor.fullType or ""),
+                tostring(descriptor.bodyLocation or ""))
+            exactLookup[exactKey] = (exactLookup[exactKey] or 0) + 1
+
+            local fullType = tostring(descriptor.fullType or "")
+            if fullType ~= "" then
+                typeLookup[fullType] = (typeLookup[fullType] or 0) + 1
+            end
+        end
+    end
+
+    return exactLookup, typeLookup
 end
 
 function Search.findPlayerOwnedItem(playerObj, descriptor, reservedItems)

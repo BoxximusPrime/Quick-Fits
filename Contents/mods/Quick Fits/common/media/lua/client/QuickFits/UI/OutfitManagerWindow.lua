@@ -8,10 +8,12 @@ require "ISUI/ISScrollingListBox"
 require "ISUI/ISToolTip"
 require "ISUI/ISModalDialog"
 require "ISUI/ISInventoryItem"
+require "ISUI/ISContextMenu"
 require "ISUI/ISMouseDrag"
 require "QuickFits/Localization"
 require "QuickFits/Data"
 require "QuickFits/Capture"
+require "QuickFits/Search"
 require "QuickFits/Apply"
 
 QuickFits = QuickFits or {}
@@ -19,6 +21,7 @@ QuickFits.UI = QuickFits.UI or {}
 
 local Data = QuickFits.Data
 local Capture = QuickFits.Capture
+local Search = QuickFits.Search
 local Apply = QuickFits.Apply
 local Localization = QuickFits.Localization
 
@@ -37,6 +40,7 @@ local BOTTOM_SECTION_PADDING = 14
 local ACTION_ROW_HEIGHT = 30
 local PROGRESS_ROW_HEIGHT = 30
 local BOTTOM_ROW_GAP = 10
+local STATE_LOOKUP_REFRESH_INTERVAL_MS = 750
 
 local CLOSE_ICON = getTexture("X.png") or getTexture("42.13/X.png")
 local CLOSE_ICON_HOVER = getTexture("X_Hover.png") or getTexture("42.13/X_Hover.png") or CLOSE_ICON
@@ -167,6 +171,41 @@ local function nowMs()
     return os.time() * 1000
 end
 
+local function isUiElementVisible(element)
+    if not element then
+        return false
+    end
+
+    if type(element.getIsVisible) == "function" then
+        local ok, visible = pcall(function()
+            return element:getIsVisible()
+        end)
+        if ok then
+            return visible == true
+        end
+    end
+
+    if type(element.isReallyVisible) == "function" then
+        local ok, visible = pcall(function()
+            return element:isReallyVisible()
+        end)
+        if ok then
+            return visible == true
+        end
+    end
+
+    if type(element.isVisible) == "function" then
+        local ok, visible = pcall(function()
+            return element:isVisible()
+        end)
+        if ok then
+            return visible == true
+        end
+    end
+
+    return element.visible == true
+end
+
 local function drawProgressFillGradient(ui, x, y, width, height)
     -- Draw base fill
     ui:drawRect(x, y, width, height, 0.9, 0.18, 0.52, 0.2)
@@ -272,6 +311,16 @@ local function getDraftRemoveButtonBounds(list, rowY, rowHeight)
     return buttonX, buttonY, buttonSize, buttonSize
 end
 
+local function clamp(value, minimum, maximum)
+    if value < minimum then
+        return minimum
+    end
+    if value > maximum then
+        return maximum
+    end
+    return value
+end
+
 local function getDescriptorLookupKey(item)
     return string.format("%s|%s", tostring(item and item.fullType or ""), tostring(item and item.bodyLocation or ""))
 end
@@ -282,6 +331,24 @@ local function copyLookupCounts(source)
         copy[key] = value
     end
     return copy
+end
+
+local function areContainerListsEqual(left, right)
+    if left == right then
+        return true
+    end
+
+    if not left or not right or #left ~= #right then
+        return false
+    end
+
+    for index = 1, #left do
+        if left[index] ~= right[index] then
+            return false
+        end
+    end
+
+    return true
 end
 
 local function buildDraftItemsSignature(items)
@@ -372,6 +439,7 @@ end
 function OutfitManagerWindow.Open(playerNum)
     if OutfitManagerWindow.instance then
         OutfitManagerWindow.instance:bringToTop()
+        OutfitManagerWindow.instance:forceRefreshStateLookups()
         return OutfitManagerWindow.instance
     end
 
@@ -396,6 +464,7 @@ function OutfitManagerWindow.Open(playerNum)
     window:setVisible(true)
     window:bringToTop()
     OutfitManagerWindow.instance = window
+    window:forceRefreshStateLookups()
     return window
 end
 
@@ -423,6 +492,21 @@ function OutfitManagerWindow:new(x, y, width, height, playerNum)
     window.currentWornLookup = {}
     window.currentWornTypeLookup = {}
     window.currentWornItemLookup = {}
+    window.currentNearbyLookup = {}
+    window.currentNearbyTypeLookup = {}
+    window.wornLookupDirty = true
+    window.nearbyLookupDirty = true
+    window.lastPlayerSquareX = nil
+    window.lastPlayerSquareY = nil
+    window.lastPlayerSquareZ = nil
+    window.lastSelectedLootContainer = nil
+    window.lastReachableLootContainers = {}
+    window.lastWornLookupRefreshAt = 0
+    window.lastNearbyLookupRefreshAt = 0
+    window.draftReorderDrag = nil
+    window.activeDraftContextRow = nil
+    window.activeDraftContextMenu = nil
+    window.draftRowHitBounds = {}
     window.activeProgress = nil
     window.savedDraftSnapshot = nil
     Localization.setPreviewLanguage(Data.getPreviewLanguage(window.playerObj) or Localization.PREVIEW_LANGUAGE_AUTO)
@@ -567,6 +651,8 @@ function OutfitManagerWindow:createChildren()
     else
         self:resetDraftFromCurrent(nil, true)
     end
+
+    self:refreshStateLookups()
 end
 
 function OutfitManagerWindow:populatePreviewLanguageCombo()
@@ -802,6 +888,21 @@ function OutfitManagerWindow:createDraftItemListWidget()
     self.itemList.onMouseDown = function(list, x, y)
         return self:onDraftListMouseDown(x, y)
     end
+    self.itemList.onMouseMove = function(list, dx, dy)
+        return self:onDraftListMouseMove(dx, dy)
+    end
+    self.itemList.onMouseMoveOutside = function(list, dx, dy)
+        return self:onDraftListMouseMoveOutside(dx, dy)
+    end
+    self.itemList.onMouseUp = function(list, x, y)
+        return self:onDraftListMouseUp(x, y)
+    end
+    self.itemList.onMouseUpOutside = function(list, x, y)
+        return self:onDraftListMouseUp(x, y)
+    end
+    self.itemList.onRightMouseUp = function(list, x, y)
+        return self:onDraftListRightMouseUp(x, y)
+    end
     self.itemList.doDrawItem = function(list, y, item, alt)
         return self:drawDraftRow(list, y, item, alt)
     end
@@ -856,9 +957,19 @@ function OutfitManagerWindow:drawDraftRow(list, y, item, alt)
         return y + rowHeight
     end
 
+    self.draftRowHitBounds[item.index] = {
+        rowY = y,
+        rowHeight = rowHeight,
+    }
+
     local draftItem = item.item
     local isIncluded = draftItem.included ~= false
     local isCurrentlyWorn = self:isDraftItemCurrentlyWorn(draftItem)
+    local isNearbyAvailable = not isCurrentlyWorn and self:isDraftItemNearbyAvailable(draftItem)
+    local isContextActive = self.activeDraftContextRow == item.index and self:isDraftContextMenuOpen()
+    local isRowHovered = not isContextActive and list.mouseoverselected == item.index and list:isMouseOver() and
+        not list:isMouseOverScrollBar()
+    local contentOffsetX = isContextActive and 2 or (isRowHovered and 1 or 0)
 
     if item.index % 2 == 0 then
         list:drawRect(0, y, list.width, rowHeight, 0.12, 0.16, 0.16, 0.18)
@@ -866,15 +977,23 @@ function OutfitManagerWindow:drawDraftRow(list, y, item, alt)
         list:drawRect(0, y, list.width, rowHeight, 0.06, 0.11, 0.11, 0.13)
     end
 
-    if list.mouseoverselected == item.index and list:isMouseOver() and not list:isMouseOverScrollBar() then
-        list:drawRect(1, y + 1, list.width - 2, rowHeight - 2, 0.15, 0.38, 0.38, 0.28)
-        list:drawRectBorder(1, y + 1, list.width - 2, rowHeight - 2, 0.5, 1, 0.97, 0.92)
+    if isContextActive then
+        list:drawRect(1, y + 1, list.width - 2, rowHeight - 2, 0.15, 0.18, 0.36, 0.28)
+        list:drawRect(1, y + 1, 5, rowHeight - 2, 0.72, 0.34, 0.78, 0.72)
+        list:drawRectBorder(1, y + 1, list.width - 2, rowHeight - 2, 0.48, 0.76, 0.84, 0.84)
+    elseif isRowHovered then
+        list:drawRect(1, y + 1, list.width - 2, rowHeight - 2, 0.09, 0.16, 0.28, 0.18)
+        list:drawRect(1, y + 1, 4, rowHeight - 2, 0.42, 0.28, 0.52, 0.5)
+        list:drawRectBorder(1, y + 1, list.width - 2, rowHeight - 2, 0.3, 0.58, 0.66, 0.68)
     end
 
     list:drawRectBorder(0, y, list.width, rowHeight, 0.1, 0.28, 0.26, 0.16)
-    drawDescriptorIcon(list, draftItem, 8, y + 6, ICON_SIZE)
+    drawDescriptorIcon(list, draftItem, 8 + contentOffsetX, y + 6, ICON_SIZE)
 
     local cbX, cbY, cbSize = getDraftRemoveButtonBounds(list, y, rowHeight)
+    self.draftRowHitBounds[item.index].buttonX = cbX
+    self.draftRowHitBounds[item.index].buttonY = cbY
+    self.draftRowHitBounds[item.index].buttonSize = cbSize
     local mouseX = getMouseX() - list:getAbsoluteX()
     local mouseY = getMouseY() - list:getAbsoluteY()
     local isHovered = mouseX >= cbX and mouseX <= (cbX + cbSize) and mouseY >= cbY and mouseY <= (cbY + cbSize)
@@ -892,11 +1011,12 @@ function OutfitManagerWindow:drawDraftRow(list, y, item, alt)
     local wornIndicatorY = y + math.floor((rowHeight - WORN_ICON_SIZE) / 2)
     if isCurrentlyWorn then
         if WORN_ICON then
-            list:drawTextureScaled(WORN_ICON, wornIndicatorX, wornIndicatorY, WORN_ICON_SIZE, WORN_ICON_SIZE,
+            list:drawTextureScaled(WORN_ICON, wornIndicatorX + contentOffsetX, wornIndicatorY, WORN_ICON_SIZE,
+                WORN_ICON_SIZE,
                 isIncluded and 1 or 0.45, 1, 1, 1)
         else
-            list:drawText(tr("label_worn"), wornIndicatorX - 6, y + 8, 0.94, 0.93, 0.88, isIncluded and 1 or 0.4,
-                UIFont.Small)
+            list:drawText(tr("label_worn"), wornIndicatorX - 6 + contentOffsetX, y + 8, 0.94, 0.93, 0.88,
+                isIncluded and 1 or 0.4, UIFont.Small)
         end
     end
 
@@ -904,8 +1024,37 @@ function OutfitManagerWindow:drawDraftRow(list, y, item, alt)
     local maxTextW = (isCurrentlyWorn and wornIndicatorX or cbX) - 42
     local displayText = truncateText(labelText, UIFont.Small, maxTextW)
     local textAlpha = isIncluded and 1 or 0.4
-    local textColor = isCurrentlyWorn and { 0.82, 0.96, 0.84 } or { 0.94, 0.93, 0.88 }
-    list:drawText(displayText, 34, y + 2, textColor[1], textColor[2], textColor[3], textAlpha, UIFont.Small)
+    local textColor = isCurrentlyWorn and { 0.82, 0.96, 0.84 }
+        or (isNearbyAvailable and { 0.62, 0.8, 0.98 } or { 0.94, 0.93, 0.88 })
+    if isContextActive then
+        textColor = isCurrentlyWorn and { 0.9, 0.98, 0.92 }
+            or (isNearbyAvailable and { 0.78, 0.9, 1 } or { 0.98, 0.97, 0.92 })
+    elseif isRowHovered then
+        textColor = isCurrentlyWorn and { 0.88, 0.98, 0.9 }
+            or (isNearbyAvailable and { 0.68, 0.84, 0.98 } or { 0.97, 0.96, 0.9 })
+    end
+
+    if self.draftReorderDrag and self.draftReorderDrag.sourceIndex == item.index then
+        list:drawRect(0, y, list.width, rowHeight, 0.16, 0.26, 0.32, 0.22)
+    end
+
+    if isContextActive then
+        list:drawText(displayText, 35 + contentOffsetX, y + 3, 0.06, 0.08, 0.1, textAlpha * 0.45, UIFont.Small)
+    elseif isRowHovered then
+        list:drawText(displayText, 35 + contentOffsetX, y + 3, 0.08, 0.1, 0.12, textAlpha * 0.55, UIFont.Small)
+    end
+
+    list:drawText(displayText, 34 + contentOffsetX, y + 2, textColor[1], textColor[2], textColor[3], textAlpha,
+        UIFont.Small)
+
+    if self.draftReorderDrag and self.draftReorderDrag.insertIndex == item.index then
+        list:drawRect(6, y, list.width - 12, 2, 0.95, 0.44, 0.82, 0.98)
+    end
+
+    if self.draftReorderDrag and self.draftReorderDrag.insertIndex == (#(self.itemList.items or {}) + 1)
+        and item.index == #(self.itemList.items or {}) then
+        list:drawRect(6, y + rowHeight - 2, list.width - 12, 2, 0.95, 0.44, 0.82, 0.98)
+    end
 
     return y + rowHeight
 end
@@ -916,6 +1065,7 @@ function OutfitManagerWindow:refreshCurrentWornLookup()
     self.currentWornItemLookup = {}
 
     if not self.playerObj then
+        self.wornLookupDirty = false
         return
     end
 
@@ -932,6 +1082,93 @@ function OutfitManagerWindow:refreshCurrentWornLookup()
             self.currentWornTypeLookup[fullType] = (self.currentWornTypeLookup[fullType] or 0) + 1
         end
     end
+
+    self.lastWornLookupRefreshAt = nowMs()
+    self.wornLookupDirty = false
+end
+
+function OutfitManagerWindow:refreshCurrentNearbyLookup()
+    self.currentNearbyLookup = {}
+    self.currentNearbyTypeLookup = {}
+
+    if not self.playerObj then
+        self.nearbyLookupDirty = false
+        return
+    end
+
+    local exactLookup, typeLookup = Search.getReachableDescriptorLookups(self.playerObj,
+        self.editorDraft and self.editorDraft.items or nil)
+    self.currentNearbyLookup = exactLookup or {}
+    self.currentNearbyTypeLookup = typeLookup or {}
+    self.lastSelectedLootContainer = Search.getSelectedLootContainer(self.playerObj)
+    self.lastReachableLootContainers = Search.getReachableLootContainers(self.playerObj) or {}
+    self.lastNearbyLookupRefreshAt = nowMs()
+
+    self.nearbyLookupDirty = false
+end
+
+function OutfitManagerWindow:forceRefreshStateLookups()
+    self:markWornLookupDirty()
+    self:markNearbyLookupDirty()
+    self:refreshStateLookups()
+end
+
+function OutfitManagerWindow:markWornLookupDirty()
+    self.wornLookupDirty = true
+end
+
+function OutfitManagerWindow:markNearbyLookupDirty()
+    self.nearbyLookupDirty = true
+end
+
+function OutfitManagerWindow:updateNearbyLookupDirtyState()
+    if not self.playerObj then
+        return
+    end
+
+    local square = self.playerObj:getCurrentSquare()
+    local squareX = square and square:getX() or nil
+    local squareY = square and square:getY() or nil
+    local squareZ = square and square:getZ() or nil
+    if squareX ~= self.lastPlayerSquareX or squareY ~= self.lastPlayerSquareY or squareZ ~= self.lastPlayerSquareZ then
+        self.lastPlayerSquareX = squareX
+        self.lastPlayerSquareY = squareY
+        self.lastPlayerSquareZ = squareZ
+        self:markNearbyLookupDirty()
+    end
+
+    local selectedLootContainer = Search.getSelectedLootContainer(self.playerObj)
+    if selectedLootContainer ~= self.lastSelectedLootContainer then
+        self.lastSelectedLootContainer = selectedLootContainer
+        self:markNearbyLookupDirty()
+    end
+
+    local reachableLootContainers = Search.getReachableLootContainers(self.playerObj) or {}
+    if not areContainerListsEqual(reachableLootContainers, self.lastReachableLootContainers) then
+        self.lastReachableLootContainers = reachableLootContainers
+        self:markNearbyLookupDirty()
+    end
+end
+
+function OutfitManagerWindow:refreshStateLookups()
+    self:updateNearbyLookupDirtyState()
+
+    local currentTime = nowMs()
+    if not self.wornLookupDirty and (currentTime - (self.lastWornLookupRefreshAt or 0)) >= STATE_LOOKUP_REFRESH_INTERVAL_MS then
+        self:markWornLookupDirty()
+    end
+
+    if not self.nearbyLookupDirty and (currentTime - (self.lastNearbyLookupRefreshAt or 0)) >= STATE_LOOKUP_REFRESH_INTERVAL_MS then
+        self:markNearbyLookupDirty()
+    end
+
+    if self.wornLookupDirty then
+        self:refreshCurrentWornLookup()
+    end
+
+    if self.nearbyLookupDirty then
+        self:refreshCurrentNearbyLookup()
+    end
 end
 
 function OutfitManagerWindow:isDraftItemCurrentlyWorn(draftItem)
@@ -946,6 +1183,20 @@ function OutfitManagerWindow:isDraftItemCurrentlyWorn(draftItem)
 
     local fullType = tostring(draftItem.fullType or "")
     return fullType ~= "" and (self.currentWornTypeLookup[fullType] or 0) > 0
+end
+
+function OutfitManagerWindow:isDraftItemNearbyAvailable(draftItem)
+    if not draftItem then
+        return false
+    end
+
+    local exactKey = getDescriptorLookupKey(draftItem)
+    if (self.currentNearbyLookup[exactKey] or 0) > 0 then
+        return true
+    end
+
+    local fullType = tostring(draftItem.fullType or "")
+    return fullType ~= "" and (self.currentNearbyTypeLookup[fullType] or 0) > 0
 end
 
 function OutfitManagerWindow:getOutfitMatchCounts(outfit)
@@ -1358,7 +1609,7 @@ function OutfitManagerWindow:updateDraftDebugTooltip()
 
     local mouseX = getMouseX() - self.itemList:getAbsoluteX()
     local mouseY = getMouseY() - self.itemList:getAbsoluteY()
-    local row = self.itemList:rowAt(mouseX, mouseY)
+    local row = self:getDraftRowIndexAtPosition(mouseX, mouseY)
     local rowItem = row and self.itemList.items[row] or nil
     if not rowItem or not rowItem.item then
         self:hideDraftDebugTooltip()
@@ -1424,6 +1675,7 @@ function OutfitManagerWindow:drawDraftDropHint()
 end
 
 function OutfitManagerWindow:render()
+    self.draftRowHitBounds = {}
     ISPanel.render(self)
     self:updateDraftDebugTooltip()
 
@@ -1474,9 +1726,14 @@ end
 
 function OutfitManagerWindow:update()
     ISPanel.update(self)
-    self:refreshCurrentWornLookup()
+    self:refreshStateLookups()
+    self:updateDraftContextHighlightState()
     self:updateWearProgress()
     self:updateSaveButtonState()
+
+    if self.draftReorderDrag then
+        self:updateDraftReorderInsertIndex()
+    end
 
     if self.draftOverlayUntil > 0 and self.draftOverlayUntil <= nowMs() then
         self.draftOverlayText = nil
@@ -1531,11 +1788,13 @@ end
 
 function OutfitManagerWindow:onMouseUp(x, y)
     self.moveWithMouse = false
+    self:finishDraftReorderDrag()
     return ISPanel.onMouseUp(self, x, y)
 end
 
 function OutfitManagerWindow:onMouseUpOutside(x, y)
     self.moveWithMouse = false
+    self:finishDraftReorderDrag()
     return ISPanel.onMouseUpOutside(self, x, y)
 end
 
@@ -1545,6 +1804,7 @@ end
 
 function OutfitManagerWindow:close()
     self:hideDraftDebugTooltip()
+    self:clearDraftContextHighlight()
     if self.playerObj then
         Data.saveWindowState(self.playerObj, self:getX(), self:getY(), self:getWidth(), self:getHeight())
     end
@@ -1675,6 +1935,15 @@ end
 
 function OutfitManagerWindow:refreshDraftList(preserveNameText)
     local currentNameText = nil
+    local selectedIndex = -1
+    local yScroll = 0
+    local preserveScroll = false
+
+    if type(preserveNameText) == "table" then
+        preserveScroll = preserveNameText.preserveScroll == true
+        preserveNameText = preserveNameText.preserveNameText == true
+    end
+
     if preserveNameText and self.nameEntry then
         currentNameText = self.nameEntry:getText()
         if self.editorDraft then
@@ -1682,14 +1951,307 @@ function OutfitManagerWindow:refreshDraftList(preserveNameText)
         end
     end
 
+    if preserveScroll and self.itemList then
+        selectedIndex = self.itemList.selected or -1
+        yScroll = self.itemList:getYScroll() or 0
+    end
+
     resetListState(self.itemList, -1)
-    self.itemList.smoothScrollTargetY = nil
-    self.itemList.smoothScrollY = nil
+    self.itemList.smoothScrollTargetY = preserveScroll and yScroll or nil
+    self.itemList.smoothScrollY = preserveScroll and yScroll or nil
     for _, item in ipairs(self.editorDraft.items or {}) do
         self.itemList:addItem(getDraftRowLabel(item), item)
     end
 
+    if preserveScroll then
+        self.itemList.selected = selectedIndex > 0 and math.min(selectedIndex, #self.itemList.items) or -1
+        self.itemList.mouseoverselected = self.itemList.selected
+        self.itemList:setYScroll(math.max(0, yScroll))
+    end
+
     self.nameEntry:setText(currentNameText or self.editorDraft.name or "")
+    self:markNearbyLookupDirty()
+end
+
+function OutfitManagerWindow:getDraftVisibleRowY(row)
+    if not self.itemList or not row then
+        return nil
+    end
+
+    local bounds = self.draftRowHitBounds and self.draftRowHitBounds[row] or nil
+    if bounds then
+        return bounds.rowY
+    end
+
+    local y = self.itemList:getYScroll() or 0
+    for index = 1, row - 1 do
+        y = y + self:getDraftRowHeight(index)
+    end
+
+    return y
+end
+
+function OutfitManagerWindow:getDraftRowHeight(row)
+    if not self.itemList or not row then
+        return nil
+    end
+
+    local rowItem = self.itemList.items and self.itemList.items[row] or nil
+    return rowItem and (rowItem.height or self.itemList.itemheight) or self.itemList.itemheight
+end
+
+function OutfitManagerWindow:getDraftRowIndexAtPosition(x, y)
+    if not self.itemList or #self.itemList.items == 0 then
+        return nil
+    end
+
+    if x < 0 or x > self.itemList.width then
+        return nil
+    end
+
+    for row, bounds in pairs(self.draftRowHitBounds or {}) do
+        if bounds and y >= bounds.rowY and y < (bounds.rowY + bounds.rowHeight) then
+            return row
+        end
+    end
+
+    for row = 1, #self.itemList.items do
+        local rowY = self:getDraftVisibleRowY(row)
+        local rowHeight = self:getDraftRowHeight(row)
+        if rowY and rowHeight and y >= rowY and y < (rowY + rowHeight) then
+            return row
+        end
+    end
+
+    return nil
+end
+
+function OutfitManagerWindow:getDraftRowAtPosition(x, y)
+    if not self.itemList or #self.itemList.items == 0 then
+        return nil, nil
+    end
+
+    local row = self:getDraftRowIndexAtPosition(x, y)
+    local rowItem = row and self.itemList.items[row] or nil
+    if not rowItem or not rowItem.item then
+        return nil, nil
+    end
+
+    return row, rowItem
+end
+
+function OutfitManagerWindow:runDraftItemAction(draftItem, actionFn)
+    if not draftItem or not actionFn then
+        return
+    end
+
+    local result, err = actionFn(self.playerObj, draftItem)
+    if not result then
+        self:setStatus(err, true)
+        return
+    end
+
+    self:beginWearProgress(Apply.consumeLastWearProgress())
+
+    local summary, isError = summarizeResult({ name = itemLabel(draftItem) }, result)
+    self:setStatus(summary, isError)
+end
+
+function OutfitManagerWindow:showDraftItemContextMenu(row, draftItem)
+    if not draftItem then
+        return false
+    end
+
+    self.itemList.selected = row
+    self.itemList.mouseoverselected = row
+
+    local context = ISContextMenu.get(self.playerNum, getMouseX(), getMouseY())
+    self.activeDraftContextRow = row
+    self.activeDraftContextMenu = context
+    context:addOption(tr("context_item_wear"), self, function(window, item)
+        window:runDraftItemAction(item, Apply.addItem)
+    end, draftItem)
+    context:addOption(tr("context_item_take_off"), self, function(window, item)
+        window:runDraftItemAction(item, Apply.removeItemToInventory)
+    end, draftItem)
+    context:addOption(tr("context_item_grab"), self, function(window, item)
+        window:runDraftItemAction(item, Apply.grabItemToInventory)
+    end, draftItem)
+    context:addOption(tr("context_item_place"), self, function(window, item)
+        window:runDraftItemAction(item, Apply.placeItemInContainer)
+    end, draftItem)
+
+    return true
+end
+
+function OutfitManagerWindow:clearDraftContextHighlight()
+    self.activeDraftContextRow = nil
+    self.activeDraftContextMenu = nil
+end
+
+function OutfitManagerWindow:isDraftContextMenuOpen()
+    return isUiElementVisible(self.activeDraftContextMenu)
+end
+
+function OutfitManagerWindow:updateDraftContextHighlightState()
+    if self.activeDraftContextMenu and not self:isDraftContextMenuOpen() then
+        self:clearDraftContextHighlight()
+    end
+end
+
+function OutfitManagerWindow:getDraftReorderInsertIndexFromMouse()
+    if not self.itemList or not self.editorDraft then
+        return nil
+    end
+
+    local itemCount = #(self.editorDraft.items or {})
+    if itemCount <= 1 then
+        return nil
+    end
+
+    local mouseX = getMouseX() - self.itemList:getAbsoluteX()
+    local mouseY = getMouseY() - self.itemList:getAbsoluteY()
+    local row = self:getDraftRowIndexAtPosition(mouseX, mouseY)
+
+    if not row then
+        if mouseY < 0 then
+            return 1
+        end
+
+        return itemCount + 1
+    end
+
+    local rowItem = self.itemList.items[row]
+    if not rowItem then
+        return itemCount + 1
+    end
+
+    local rowTop = self:getDraftVisibleRowY(row)
+    local rowHeight = rowItem.height or self.itemList.itemheight
+    if rowTop and mouseY >= (rowTop + math.floor(rowHeight / 2)) then
+        return row + 1
+    end
+
+    return row
+end
+
+function OutfitManagerWindow:updateDraftReorderInsertIndex()
+    if not self.draftReorderDrag then
+        return
+    end
+
+    local itemCount = #(self.editorDraft and self.editorDraft.items or {})
+    if itemCount <= 1 then
+        self.draftReorderDrag.insertIndex = nil
+        return
+    end
+
+    local insertIndex = self:getDraftReorderInsertIndexFromMouse()
+    if not insertIndex then
+        self.draftReorderDrag.insertIndex = nil
+        return
+    end
+
+    self.draftReorderDrag.insertIndex = clamp(insertIndex, 1, itemCount + 1)
+end
+
+function OutfitManagerWindow:startDraftReorderDrag(sourceIndex)
+    local itemCount = #(self.editorDraft and self.editorDraft.items or {})
+    if not sourceIndex or sourceIndex < 1 or sourceIndex > itemCount or itemCount <= 1 then
+        return false
+    end
+
+    self.draftReorderDrag = {
+        sourceIndex = sourceIndex,
+        insertIndex = sourceIndex,
+    }
+    self:updateDraftReorderInsertIndex()
+    return true
+end
+
+function OutfitManagerWindow:moveDraftItem(sourceIndex, targetIndex)
+    local items = self.editorDraft and self.editorDraft.items or nil
+    if not items then
+        return false
+    end
+
+    local itemCount = #items
+    sourceIndex = clamp(sourceIndex or 0, 1, itemCount)
+    targetIndex = clamp(targetIndex or 0, 1, itemCount + 1)
+
+    if targetIndex > sourceIndex then
+        targetIndex = targetIndex - 1
+    end
+
+    if targetIndex == sourceIndex then
+        return false
+    end
+
+    local movedItem = table.remove(items, sourceIndex)
+    table.insert(items, targetIndex, movedItem)
+    self:refreshDraftList({ preserveNameText = true, preserveScroll = true })
+    self.itemList.selected = targetIndex
+    self.itemList.mouseoverselected = targetIndex
+    return true
+end
+
+function OutfitManagerWindow:finishDraftReorderDrag()
+    local drag = self.draftReorderDrag
+    if not drag then
+        return false
+    end
+
+    self.draftReorderDrag = nil
+    local didMove = self:moveDraftItem(drag.sourceIndex, drag.insertIndex or drag.sourceIndex)
+    return didMove
+end
+
+function OutfitManagerWindow:updateDraftListHoverFromMouse()
+    if not self.itemList then
+        return nil
+    end
+
+    if not self.itemList:isMouseOver() or self.itemList:isMouseOverScrollBar() then
+        self.itemList.mouseoverselected = 0
+        return nil
+    end
+
+    local mouseX = getMouseX() - self.itemList:getAbsoluteX()
+    local mouseY = getMouseY() - self.itemList:getAbsoluteY()
+    local row = self:getDraftRowIndexAtPosition(mouseX, mouseY)
+    self.itemList.mouseoverselected = row or 0
+    return row
+end
+
+function OutfitManagerWindow:onDraftListMouseMove(dx, dy)
+    self:updateDraftListHoverFromMouse()
+
+    if self.draftReorderDrag then
+        self:updateDraftReorderInsertIndex()
+        return true
+    end
+
+    return false
+end
+
+function OutfitManagerWindow:onDraftListMouseMoveOutside(dx, dy)
+    if self.itemList then
+        self.itemList.mouseoverselected = 0
+    end
+
+    return false
+end
+
+function OutfitManagerWindow:onDraftListMouseUp(x, y)
+    self:updateDraftListHoverFromMouse()
+
+    if self.draftReorderDrag then
+        self:updateDraftReorderInsertIndex()
+        self:finishDraftReorderDrag()
+        return true
+    end
+
+    return false
 end
 
 function OutfitManagerWindow:getSelectedOutfit()
@@ -1722,6 +2284,7 @@ end
 function OutfitManagerWindow:onOutfitSelected(outfit)
     self.selectedOutfitId = outfit.id
     self:loadDraftFromOutfit(outfit)
+    self:forceRefreshStateLookups()
     self:setStatus(tr("status_selected_outfit", outfit.name), false)
 end
 
@@ -1730,19 +2293,49 @@ function OutfitManagerWindow:onDraftListMouseDown(x, y)
         return true
     end
 
-    local row = self.itemList:rowAt(x, y)
-    local rowItem = self.itemList.items[row]
-    if not rowItem or not rowItem.item then
+    local localMouseX = getMouseX() - self.itemList:getAbsoluteX()
+    local localMouseY = getMouseY() - self.itemList:getAbsoluteY()
+
+    local row, rowItem = self:getDraftRowAtPosition(localMouseX, localMouseY)
+    if not rowItem then
         return true
     end
 
-    local rowY = self.itemList:topOfItem(row)
-    local buttonX, buttonY, buttonW, buttonH = getDraftRemoveButtonBounds(self.itemList, rowY,
-        rowItem.height or self.itemList.itemheight)
-    if x >= buttonX and x <= (buttonX + buttonW) and y >= buttonY and y <= (buttonY + buttonH) then
-        rowItem.item.included = rowItem.item.included == false
+    local bounds = self.draftRowHitBounds and self.draftRowHitBounds[row] or nil
+    local buttonX = bounds and bounds.buttonX or nil
+    local buttonY = bounds and bounds.buttonY or nil
+    local buttonW = bounds and bounds.buttonSize or nil
+    local buttonH = bounds and bounds.buttonSize or nil
+    if not buttonX or not buttonY or not buttonW or not buttonH then
+        local rowY = self:getDraftVisibleRowY(row)
+        buttonX, buttonY, buttonW, buttonH = getDraftRemoveButtonBounds(self.itemList, rowY,
+            rowItem.height or self.itemList.itemheight)
     end
+    if localMouseX >= buttonX and localMouseX <= (buttonX + buttonW)
+        and localMouseY >= buttonY and localMouseY <= (buttonY + buttonH) then
+        rowItem.item.included = rowItem.item.included == false
+        self.itemList.selected = row
+        self.itemList.mouseoverselected = row
+        self:refreshDraftList({ preserveNameText = true, preserveScroll = true })
+        return true
+    end
+
+    self.itemList.selected = row
+    self.itemList.mouseoverselected = row
+    self:startDraftReorderDrag(row)
     return true
+end
+
+function OutfitManagerWindow:onDraftListRightMouseUp(x, y)
+    local localMouseX = getMouseX() - self.itemList:getAbsoluteX()
+    local localMouseY = getMouseY() - self.itemList:getAbsoluteY()
+    local row, rowItem = self:getDraftRowAtPosition(localMouseX, localMouseY)
+    if not rowItem then
+        return false
+    end
+
+    self.draftReorderDrag = nil
+    return self:showDraftItemContextMenu(row, rowItem.item)
 end
 
 function OutfitManagerWindow:buildDraftFromEditor()
@@ -1755,6 +2348,7 @@ end
 function OutfitManagerWindow:onCaptureCurrent()
     local selectedOutfit = self:getSelectedOutfit()
     self:resetDraftFromCurrent(selectedOutfit, false)
+    self:forceRefreshStateLookups()
     self:setStatus(tr("status_captured_current"), false)
 end
 
@@ -1768,6 +2362,7 @@ function OutfitManagerWindow:onNewDraft()
     self.draftOverlayUntil = 0
     self:refreshDraftList()
     self:setSavedDraftSnapshot(self.editorDraft)
+    self:forceRefreshStateLookups()
     self:setStatus(tr("status_new_draft"), false)
 end
 
@@ -1925,4 +2520,57 @@ function OutfitManagerWindow:onStopProgress()
 
     Apply.stopTimedActionQueue(self.playerObj)
     self:setProgressEnded("interrupted")
+end
+
+local function getOpenWindow()
+    return OutfitManagerWindow.instance
+end
+
+local function markOpenWindowNearbyLookupDirty()
+    local window = getOpenWindow()
+    if window then
+        window:markNearbyLookupDirty()
+    end
+end
+
+local function markOpenWindowWornLookupDirty(playerObj)
+    local window = getOpenWindow()
+    if not window then
+        return
+    end
+
+    if not playerObj or window.playerObj == playerObj then
+        window:markWornLookupDirty()
+    end
+end
+
+if not QuickFits.UI._outfitManagerWindowEventsRegistered then
+    QuickFits.UI._outfitManagerWindowEventsRegistered = true
+
+    Events.OnClothingUpdated.Add(function(playerObj)
+        markOpenWindowWornLookupDirty(playerObj)
+    end)
+
+    Events.OnContainerUpdate.Add(function()
+        markOpenWindowNearbyLookupDirty()
+    end)
+
+    Events.OnRefreshInventoryWindowContainers.Add(function(page)
+        local window = getOpenWindow()
+        if not window then
+            return
+        end
+
+        if not page or page.player == window.playerNum then
+            window:markNearbyLookupDirty()
+        end
+    end)
+
+    Events.OnObjectAdded.Add(function()
+        markOpenWindowNearbyLookupDirty()
+    end)
+
+    Events.OnObjectAboutToBeRemoved.Add(function()
+        markOpenWindowNearbyLookupDirty()
+    end)
 end
